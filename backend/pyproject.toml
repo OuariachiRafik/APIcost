@@ -1,0 +1,108 @@
+[project]
+name = "apicost"
+version = "0.1.0"
+description = "Proxy-based LLM cost optimization for solo developers"
+requires-python = ">=3.12,<3.13"
+
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.32",
+    "gunicorn>=23.0",
+    "pydantic>=2.9",
+    "pydantic-settings>=2.6",
+    "sqlalchemy[asyncio]>=2.0.36",
+    "asyncpg>=0.30",
+    "alembic>=1.14",
+    "pgvector>=0.3.6",
+    "redis>=5.2",
+    "structlog>=24.4",
+    "httpx[http2]>=0.28",
+    "python-ulid>=3.0",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.3",
+    "pytest-asyncio>=0.24",
+    "pytest-cov>=6.0",
+    "ruff>=0.8",
+    "mypy>=1.13",
+]
+# Heavy ML dependencies live here so the api/worker images can skip them.
+# Installed only where the embedder and classifier actually run (P4, P5).
+ml = [
+    "fastembed>=0.4",
+    "scikit-learn>=1.5",
+    "numpy>=2.1",
+    "joblib>=1.4",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/apicost"]
+
+[tool.uv]
+default-groups = ["dev"]
+
+# ---------------------------------------------------------------------------
+# Lint / format
+# ---------------------------------------------------------------------------
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = [
+    "E",   # pycodestyle
+    "F",   # pyflakes
+    "I",   # isort
+    "N",   # pep8-naming
+    "UP",  # pyupgrade
+    "B",   # bugbear
+    "C4",  # comprehensions
+    "SIM", # simplify
+    "RUF",
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S101"]
+
+# ---------------------------------------------------------------------------
+# Types
+# ---------------------------------------------------------------------------
+
+[tool.mypy]
+python_version = "3.12"
+files = ["src/apicost", "tests"]
+plugins = ["pydantic.mypy"]
+ignore_missing_imports = true
+warn_unused_configs = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+
+# CLAUDE.md §Style: strict on the pure/critical core only.
+[[tool.mypy.overrides]]
+module = [
+    "apicost.core.*",
+    "apicost.metrics.*",
+    "apicost.stats.*",
+    "apicost.advisor.*",
+]
+strict = true
+
+# ---------------------------------------------------------------------------
+# Tests
+# ---------------------------------------------------------------------------
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+addopts = "-q --strict-markers"
+markers = [
+    "integration: requires live Postgres and Redis (auto-skipped when unreachable)",
+]

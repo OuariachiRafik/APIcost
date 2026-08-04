@@ -1,0 +1,33 @@
+# WSL / Windows artifacts
+*:Zone.Identifier
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+coverage.xml
+htmlcov/
+dist/
+build/
+*.egg-info/
+
+# Node
+node_modules/
+web/dist/
+.vite/
+coverage/
+
+# Environment — never commit real secrets
+.env
+.env.*
+!.env.example
+
+# Editors / OS
+.DS_Store
+.idea/
+.vscode/

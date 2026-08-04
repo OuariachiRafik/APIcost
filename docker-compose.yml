@@ -1,0 +1,144 @@
+# Local development stack. Compose v2 spec — no `version:` key.
+#
+# The app services wait on `condition: service_healthy`, so the proxy and API
+# never start against a Postgres that is still initializing.
+
+name: apicost
+
+x-backend-env: &backend-env
+  APICOST_ENVIRONMENT: local
+  APICOST_LOG_LEVEL: ${APICOST_LOG_LEVEL:-INFO}
+  APICOST_LOG_JSON: "true"
+  APICOST_DATABASE_URL: postgresql+asyncpg://apicost:apicost@postgres:5432/apicost
+  APICOST_REDIS_URL: redis://redis:6379/0
+  APICOST_SMTP_HOST: mailpit
+  APICOST_SMTP_PORT: "1025"
+  # Dev-only placeholder. Real deployments supply this from the environment and
+  # never from a file in the repo (CLAUDE.md hard rule 4).
+  APICOST_KMS_MASTER_KEY: ${APICOST_KMS_MASTER_KEY:-local-dev-master-key-do-not-use-in-prod}
+  APICOST_JWT_SECRET: ${APICOST_JWT_SECRET:-local-dev-jwt-secret-do-not-use-in-prod}
+
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_USER: apicost
+      POSTGRES_PASSWORD: apicost
+      POSTGRES_DB: apicost
+    ports:
+      # 5433 on the host, deliberately. A developer with a system Postgres on
+      # 5432 would otherwise have `make migrate` silently run against their own
+      # database. Container-to-container traffic still uses 5432.
+      - "5433:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U apicost -d apicost"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+      start_period: 5s
+
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+
+  mailpit:
+    image: axllent/mailpit:latest
+    ports:
+      - "8025:8025"   # web UI
+      - "1025:1025"   # SMTP
+    environment:
+      MP_MAX_MESSAGES: "500"
+
+  proxy:
+    build:
+      context: ./backend
+    command:
+      - uvicorn
+      - apicost.main_proxy:app
+      - --host=0.0.0.0
+      - --port=8000
+      - --reload
+      - --reload-dir=/app/src
+    environment: *backend-env
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./backend/src:/app/src
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/healthz')"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
+
+  api:
+    build:
+      context: ./backend
+    command:
+      - uvicorn
+      - apicost.main_api:app
+      - --host=0.0.0.0
+      - --port=8001
+      - --reload
+      - --reload-dir=/app/src
+    environment: *backend-env
+    ports:
+      - "8001:8001"
+    volumes:
+      - ./backend/src:/app/src
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8001/healthz')"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
+
+  # ARQ worker. Drains the ledger stream and runs scheduled jobs from P2 onward;
+  # until worker/tasks.py has a WorkerSettings, it idles rather than crash-looping.
+  worker:
+    build:
+      context: ./backend
+    command: ["python", "-c", "import time; print('worker idle until P2', flush=True); time.sleep(2**31)"]
+    environment: *backend-env
+    volumes:
+      - ./backend/src:/app/src
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  web:
+    image: node:20-alpine
+    working_dir: /app
+    command: ["sh", "-c", "npm install && npm run dev -- --host 0.0.0.0"]
+    environment:
+      VITE_API_BASE_URL: http://localhost:8001
+    ports:
+      - "5173:5173"
+    volumes:
+      - ./web:/app
+      - web-node-modules:/app/node_modules
+
+volumes:
+  postgres-data:
+  web-node-modules:

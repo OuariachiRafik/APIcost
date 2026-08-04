@@ -38,6 +38,11 @@ They share `db/`, `core/`, `ledger/`, `vault/`, and `metrics/`, and they run as 
 processes** from the **same codebase**. A slow dashboard query must never be able to exhaust the
 proxy's connection pool.
 
+Both are built by `create_app()` in `app.py`, which supplies the request-id middleware, the RFC 7807
+error handlers, and the `/healthz` + `/readyz` pair. That factory holds only what is genuinely common
+to both planes — plane-specific behavior belongs in `proxy/` or `api/`, never behind a flag in the
+factory.
+
 ---
 
 ## 3. The request lifecycle (read `proxy/pipeline.py` alongside this)
@@ -94,6 +99,10 @@ the request still succeeds.
 | Touch encryption | `vault/kms.py`, `vault/provider_keys.py` — read §7 first |
 | Change the DB schema | `db/models.py` + `alembic revision --autogenerate` |
 | Add config | `config.py` only — never read `os.environ` elsewhere |
+| Change health checks, request-id binding, or error handlers | `app.py` — the factory both entrypoints call ([ADR 0003](adr/0003-shared-asgi-app-factory.md)) |
+| Touch Postgres connectivity or RLS scoping | `db/session.py` |
+| Touch Redis connectivity | `db/redis.py` ([ADR 0002](adr/0002-shared-redis-client-module.md)) |
+| Add or upgrade a Python dependency | `backend/pyproject.toml`, then `uv lock` ([ADR 0001](adr/0001-uv-as-python-toolchain.md)) |
 
 ---
 
@@ -187,14 +196,23 @@ of the product's actual arithmetic.
 
 ## 10. Running it locally
 
+Prerequisites: [uv](https://docs.astral.sh/uv/), Docker with Compose **v2**, Node 20+, and `make`.
+uv provisions the pinned Python 3.12 itself, so no system Python is required — see
+[ADR 0001](adr/0001-uv-as-python-toolchain.md). Every Python command in this repo runs through
+`uv run --project backend`; a bare `python3` picks up whatever is first on PATH and is always a bug.
+
 ```bash
 cp .env.example .env          # set a local KMS master key; provider keys are your own
+make install                  # uv sync (backend) + npm install (web)
 make dev                      # postgres + redis + mailpit + proxy + api + worker + web
 make migrate                  # apply Alembic migrations
 make seed                     # demo user, project, and synthetic ledger history
 make test                     # backend + frontend suites
 make lint                     # ruff, mypy, eslint
 ```
+
+`make test` runs without the stack up: tests needing live Postgres or Redis are marked
+`integration` and skip themselves when those services are unreachable.
 
 Ports: proxy `:8000`, dashboard API `:8001`, web `:5173`, mailpit UI `:8025`.
 
