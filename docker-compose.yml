@@ -9,7 +9,10 @@ x-backend-env: &backend-env
   APICOST_ENVIRONMENT: local
   APICOST_LOG_LEVEL: ${APICOST_LOG_LEVEL:-INFO}
   APICOST_LOG_JSON: "true"
-  APICOST_DATABASE_URL: postgresql+asyncpg://apicost:apicost@postgres:5432/apicost
+  # The application connects as the unprivileged role, never as the superuser
+  # that owns the schema — a superuser bypasses row-level security.
+  # See docker/postgres/init/01-app-role.sql.
+  APICOST_DATABASE_URL: postgresql+asyncpg://apicost_app:apicost_app@postgres:5432/apicost
   APICOST_REDIS_URL: redis://redis:6379/0
   APICOST_SMTP_HOST: mailpit
   APICOST_SMTP_PORT: "1025"
@@ -32,6 +35,7 @@ services:
       - "5433:5432"
     volumes:
       - postgres-data:/var/lib/postgresql/data
+      - ./docker/postgres/init:/docker-entrypoint-initdb.d:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U apicost -d apicost"]
       interval: 2s

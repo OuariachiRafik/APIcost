@@ -103,6 +103,11 @@ the request still succeeds.
 | Touch Postgres connectivity or RLS scoping | `db/session.py` |
 | Touch Redis connectivity | `db/redis.py` ([ADR 0002](adr/0002-shared-redis-client-module.md)) |
 | Add or upgrade a Python dependency | `backend/pyproject.toml`, then `uv lock` ([ADR 0001](adr/0001-uv-as-python-toolchain.md)) |
+| Change hashing, JWTs, or proxy-key generation | `core/security.py` |
+| Change how provider keys are encrypted | `vault/kms.py`, `vault/provider_keys.py` |
+| Add a control-plane endpoint | `api/routers/`, wired up in `main_api.py` |
+| Change database roles or grants | `docker/postgres/init/01-app-role.sql` — read §7.3 first |
+| Change where the browser keeps tokens | `web/src/lib/auth.tsx` ([ADR 0004](adr/0004-spa-token-storage.md)) |
 
 ---
 
@@ -150,6 +155,18 @@ Break any of these and you have a serious incident, not a bug.
    same operation as the DB write, or a revoked key keeps working for up to 60 seconds.
 3. Every user-scoped query is bounded by `user_id` **and** protected by Postgres row-level security.
    The application-layer filter is the first line, RLS is the second. Both are required.
+
+   Three things make RLS actually work here, and each has silently defeated it once already:
+
+   - **The app connects as `apicost_app`, never as the schema owner.** A Postgres superuser bypasses
+     RLS unconditionally — `FORCE ROW LEVEL SECURITY` does not apply to them — so connecting as the
+     owner leaves every policy in place and inert. Migrations use `database_admin_url`; the
+     application uses `database_url`. See `docker/postgres/init/01-app-role.sql`.
+   - **Policies use `NULLIF(current_setting('app.user_id', true), '')`.** After a transaction-local
+     `set_config` commits, the setting reverts to the *empty string*, not to unset. A bare `IS NULL`
+     check therefore fails on any pooled connection that has already served one scoped request.
+   - **`FORCE ROW LEVEL SECURITY`, not just `ENABLE`.** The tables are owned by the role running the
+     migrations, and a plain `ENABLE` exempts the owner.
 4. Raw prompt/response text is not persisted unless the project has `store_raw_content = true`. The
    cache is the exception, and cached bodies are encrypted with the per-user data key.
 5. TLS everywhere, no plaintext fallback, including on the proxy path.

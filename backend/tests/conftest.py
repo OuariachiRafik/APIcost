@@ -21,10 +21,20 @@ from httpx import ASGITransport, AsyncClient
 from apicost.config import Settings, get_settings
 from apicost.core.logging import clear_request_id
 
+TEST_JWT_SECRET = "test-only-jwt-signing-secret-at-least-32-bytes-long"
+TEST_KMS_MASTER_KEY = "test-only-kms-master-key"
+
 
 @pytest.fixture(autouse=True)
-def _reset_process_state() -> Iterator[None]:
-    """Keep cached settings and bound context out of each other's tests."""
+def _reset_process_state(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    """Keep cached settings and bound context out of each other's tests.
+
+    Also supplies the two secrets that have no safe default: the app refuses to
+    invent a signing key or a KMS master key, so tests provide test-only ones
+    rather than the code silently falling back to something weak.
+    """
+    monkeypatch.setenv("APICOST_JWT_SECRET", TEST_JWT_SECRET)
+    monkeypatch.setenv("APICOST_KMS_MASTER_KEY", TEST_KMS_MASTER_KEY)
     get_settings.cache_clear()
     clear_request_id()
     yield

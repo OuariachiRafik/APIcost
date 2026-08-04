@@ -33,8 +33,12 @@ jobs:
           --health-interval 2s --health-timeout 3s --health-retries 15
 
     env:
-      APICOST_DATABASE_URL: postgresql+asyncpg://apicost:apicost@localhost:5432/apicost
+      # The app connects as the unprivileged role; a superuser bypasses RLS.
+      APICOST_DATABASE_URL: postgresql+asyncpg://apicost_app:apicost_app@localhost:5432/apicost
+      APICOST_DATABASE_ADMIN_URL: postgresql+asyncpg://apicost:apicost@localhost:5432/apicost
       APICOST_REDIS_URL: redis://localhost:6379/0
+      APICOST_JWT_SECRET: ci-only-jwt-signing-secret-at-least-32-bytes
+      APICOST_KMS_MASTER_KEY: ci-only-kms-master-key
 
     # alembic.ini and pytest's testpaths are relative to backend/.
     defaults:
@@ -50,6 +54,13 @@ jobs:
         with:
           enable-cache: true
           cache-dependency-glob: backend/uv.lock
+
+      # Service containers cannot run /docker-entrypoint-initdb.d scripts, so
+      # the application role is created here from the same SQL compose uses.
+      - name: Create the application database role
+        env:
+          PGPASSWORD: apicost
+        run: psql -h localhost -U apicost -d apicost -v ON_ERROR_STOP=1 -f ../docker/postgres/init/01-app-role.sql
 
       - name: Install (locked)
         run: uv sync --frozen

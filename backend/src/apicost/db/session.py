@@ -33,6 +33,7 @@ __all__ = [
     "get_engine",
     "get_sessionmaker",
     "session_scope",
+    "set_rls_user",
 ]
 
 _engine: AsyncEngine | None = None
@@ -73,6 +74,20 @@ async def dispose_engine() -> None:
         await _engine.dispose()
     _engine = None
     _sessionmaker = None
+
+
+async def set_rls_user(session: AsyncSession, user_id: str) -> None:
+    """Scope an already-open session to ``user_id`` for row-level security.
+
+    Needed by the authentication flow, which necessarily starts unscoped: at
+    signup there is no user yet, and at token rotation we identify the user by
+    looking the token hash up. Once the user is known, every subsequent write
+    in that transaction must be scoped, because the RLS policies on
+    ``refresh_tokens`` require a match on ``WITH CHECK``.
+    """
+    await session.execute(
+        text("SELECT set_config('app.user_id', :user_id, true)"), {"user_id": user_id}
+    )
 
 
 @asynccontextmanager

@@ -15,11 +15,11 @@ from sqlalchemy.engine import Connection
 from sqlalchemy.ext.asyncio import create_async_engine
 
 from apicost.config import get_settings
-from apicost.db.base import Base
 
 # Importing the models module registers every table on Base.metadata so
-# `alembic revision --autogenerate` can see them. Added in P1.
-# from apicost.db import models
+# `alembic revision --autogenerate` can see them.
+from apicost.db import models  # noqa: F401
+from apicost.db.base import Base
 
 config = context.config
 
@@ -30,7 +30,12 @@ target_metadata = Base.metadata
 
 
 def _database_url() -> str:
-    return get_settings().database_url
+    """Migrations run as the schema owner, not as the application role.
+
+    The application connects with a role that has no DDL rights and, crucially,
+    cannot bypass row-level security.
+    """
+    return get_settings().database_admin_url
 
 
 def run_migrations_offline() -> None:

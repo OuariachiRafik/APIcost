@@ -1,43 +1,47 @@
 /**
- * Placeholder shell.
+ * Application shell.
  *
- * The real routes — onboarding, dashboard, requests, cache, routing, budgets,
- * alerts, advisor, settings — arrive from P1 onward (BUILD_SPEC §3).
+ * P1 has exactly two states: signed out (auth form) and signed in (onboarding).
+ * That does not warrant a router, and BUILD_SPEC §2 does not list one in the
+ * stack, so there is none. P3 introduces real navigation across the dashboard
+ * routes and is the right moment to decide on one.
  */
-import { useQuery } from '@tanstack/react-query';
-
-import { getReadiness } from '../lib/api';
+import { AuthForm } from './AuthForm';
+import { Onboarding } from './Onboarding';
+import { Button } from '../components/ui';
+import { useAuth } from '../lib/authContext';
 
 export function Root() {
-  const { data, isPending, isError } = useQuery({
-    queryKey: ['readiness'],
-    queryFn: getReadiness,
-    retry: false,
-  });
+  const { user, isLoading, logout } = useAuth();
 
   return (
-    <main className="mx-auto max-w-2xl p-8 font-sans">
-      <h1 className="text-2xl font-semibold">APICost</h1>
-      <p className="mt-2 text-sm text-gray-600">Scaffolding only. The dashboard is built in P3.</p>
+    <div className="min-h-screen bg-slate-50">
+      <header className="border-b border-slate-200 bg-white">
+        <div className="mx-auto flex max-w-3xl items-center justify-between px-6 py-4">
+          <div>
+            <h1 className="text-base font-semibold text-slate-900">APICost</h1>
+            <p className="text-xs text-slate-500">Spend less on the same LLM calls.</p>
+          </div>
+          {user && (
+            <div className="flex items-center gap-3">
+              <span className="text-sm text-slate-600">{user.email}</span>
+              <Button variant="secondary" onClick={() => void logout()}>
+                Sign out
+              </Button>
+            </div>
+          )}
+        </div>
+      </header>
 
-      <section className="mt-6 rounded-lg border border-gray-200 p-4">
-        <h2 className="text-sm font-medium uppercase tracking-wide text-gray-500">Dashboard API</h2>
-        {isPending && <p className="mt-2 text-sm">Checking…</p>}
-        {isError && (
-          <p className="mt-2 text-sm text-red-600" role="alert">
-            Unreachable — is <code>make dev</code> running?
-          </p>
+      <main className="mx-auto max-w-3xl px-6 py-10">
+        {isLoading ? (
+          <p className="text-sm text-slate-500">Loading…</p>
+        ) : user ? (
+          <Onboarding />
+        ) : (
+          <AuthForm />
         )}
-        {data && (
-          <ul className="mt-2 space-y-1 text-sm">
-            {Object.entries(data.checks).map(([name, ok]) => (
-              <li key={name}>
-                {name}: <span className={ok ? 'text-green-600' : 'text-red-600'}>{String(ok)}</span>
-              </li>
-            ))}
-          </ul>
-        )}
-      </section>
-    </main>
+      </main>
+    </div>
   );
 }

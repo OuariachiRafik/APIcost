@@ -18,6 +18,10 @@ dependencies = [
     "structlog>=24.4",
     "httpx[http2]>=0.28",
     "python-ulid>=3.0",
+    "argon2-cffi>=23.1",
+    "pyjwt>=2.10",
+    "cryptography>=44.0",
+    "email-validator>=2.2",
 ]
 
 [dependency-groups]

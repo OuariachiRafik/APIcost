@@ -39,9 +39,20 @@ class Settings(BaseSettings):
     """JSON renderer in every environment; flip to False for human-readable local logs."""
 
     # -- Datastores -------------------------------------------------------
-    database_url: str = "postgresql+asyncpg://apicost:apicost@localhost:5433/apicost"
-    """Host port 5433, not 5432 — see the note in docker-compose.yml. A system
-    Postgres on the default port must never be hit by our migrations."""
+    database_url: str = "postgresql+asyncpg://apicost_app:apicost_app@localhost:5433/apicost"
+    """Connection used by the application, as the **unprivileged** role.
+
+    A Postgres superuser bypasses row-level security unconditionally, so
+    connecting as the schema owner would disable every policy in the migration
+    while leaving them visible in the code. See
+    docker/postgres/init/01-app-role.sql.
+
+    Host port 5433, not 5432 — see the note in docker-compose.yml. A system
+    Postgres on the default port must never be hit by our migrations.
+    """
+
+    database_admin_url: str = "postgresql+asyncpg://apicost:apicost@localhost:5433/apicost"
+    """Connection used by Alembic only. Owns the schema and may run DDL."""
 
     redis_url: str = "redis://localhost:6379/0"
 
@@ -61,8 +72,14 @@ class Settings(BaseSettings):
     """Sub-budget for embedding on the cache path; overrun proceeds as a miss."""
 
     # -- Secrets (consumed from P1 onward) --------------------------------
+    kms_provider: Literal["local", "aws"] = "local"
+    """Switching to "aws" is the one-line change BUILD_SPEC §4 P1 calls for."""
+
     kms_master_key: SecretStr = SecretStr("")
-    """LocalKMS master key for dev. In prod the AWS KMS impl is used instead."""
+    """LocalKMS master key for dev. Unused when kms_provider is "aws"."""
+
+    kms_key_id: str = ""
+    kms_region: str = ""
 
     jwt_secret: SecretStr = SecretStr("")
 
