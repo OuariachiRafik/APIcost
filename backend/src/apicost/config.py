@@ -71,6 +71,26 @@ class Settings(BaseSettings):
     embedding_budget_ms: int = 40
     """Sub-budget for embedding on the cache path; overrun proceeds as a miss."""
 
+    # -- Provider forwarding ----------------------------------------------
+    provider_timeout_seconds: float = 120.0
+    """Generous on purpose. This bounds the *provider's* own generation time,
+    not our overhead — a long completion is normal, and cutting it off would
+    break the caller's request for no benefit."""
+
+    provider_base_url_override: str = ""
+    """Points every provider at a stub. Tests and local development only."""
+
+    # -- Ledger (BUILD_SPEC §4 P2) ----------------------------------------
+    ledger_stream_key: str = "apicost:ledger"
+    ledger_stream_maxlen: int = 500_000
+    """Approximate cap on the Redis stream. If the worker falls this far
+    behind, the oldest events are dropped rather than exhausting memory and
+    taking the proxy down with it — losing observability beats losing the
+    data plane."""
+
+    ledger_batch_size: int = 500
+    ledger_block_ms: int = 5_000
+
     # -- Secrets (consumed from P1 onward) --------------------------------
     kms_provider: Literal["local", "aws"] = "local"
     """Switching to "aws" is the one-line change BUILD_SPEC §4 P1 calls for."""

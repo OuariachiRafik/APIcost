@@ -27,7 +27,7 @@ def get_redis(settings: Settings | None = None) -> Redis:
     global _client
     if _client is None:
         cfg = settings or get_settings()
-        _client = from_url(cfg.redis_url, decode_responses=True)
+        _client = from_url(cfg.redis_url, decode_responses=True)  # type: ignore[no-untyped-call]
     return _client
 
 

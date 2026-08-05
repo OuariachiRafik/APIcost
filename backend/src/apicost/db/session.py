@@ -30,6 +30,7 @@ from apicost.config import Settings, get_settings
 __all__ = [
     "check_postgres",
     "dispose_engine",
+    "get_admin_engine",
     "get_engine",
     "get_sessionmaker",
     "session_scope",
@@ -37,6 +38,7 @@ __all__ = [
 ]
 
 _engine: AsyncEngine | None = None
+_admin_engine: AsyncEngine | None = None
 _sessionmaker: async_sessionmaker[AsyncSession] | None = None
 
 
@@ -67,13 +69,39 @@ def get_sessionmaker(settings: Settings | None = None) -> async_sessionmaker[Asy
     return _sessionmaker
 
 
+def get_admin_engine(settings: Settings | None = None) -> AsyncEngine:
+    """Engine connected as the schema owner, exempt from row-level security.
+
+    Exactly two callers are legitimate:
+
+    * Alembic, which needs DDL rights;
+    * the ledger drain, which writes one batch spanning many users and so has
+      no single ``app.user_id`` to scope itself to.
+
+    The drain is safe on this connection because it never *reads* user data and
+    never accepts a caller-supplied user id — it copies the id the proxy
+    already authenticated. Anything that serves a user request must use
+    :func:`get_engine` instead.
+    """
+    global _admin_engine
+    if _admin_engine is None:
+        cfg = settings or get_settings()
+        _admin_engine = create_async_engine(
+            cfg.database_admin_url, echo=cfg.db_echo, pool_size=2, max_overflow=2
+        )
+    return _admin_engine
+
+
 async def dispose_engine() -> None:
-    """Tear down the engine and factory. Called from app shutdown and tests."""
-    global _engine, _sessionmaker
+    """Tear down the engines and factory. Called from app shutdown and tests."""
+    global _engine, _sessionmaker, _admin_engine
     if _engine is not None:
         await _engine.dispose()
+    if _admin_engine is not None:
+        await _admin_engine.dispose()
     _engine = None
     _sessionmaker = None
+    _admin_engine = None
 
 
 async def set_rls_user(session: AsyncSession, user_id: str) -> None:

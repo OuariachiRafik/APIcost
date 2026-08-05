@@ -13,7 +13,7 @@ from __future__ import annotations
 
 from fastapi import FastAPI
 
-from apicost.api.routers import auth, keys, projects, proxy_keys
+from apicost.api.routers import auth, connection, keys, projects, proxy_keys
 from apicost.app import create_app
 
 app: FastAPI = create_app(
@@ -27,3 +27,4 @@ app.include_router(auth.router)
 app.include_router(keys.router)
 app.include_router(projects.router)
 app.include_router(proxy_keys.router)
+app.include_router(connection.router)

@@ -116,12 +116,12 @@ services:
       retries: 10
       start_period: 5s
 
-  # ARQ worker. Drains the ledger stream and runs scheduled jobs from P2 onward;
-  # until worker/tasks.py has a WorkerSettings, it idles rather than crash-looping.
+  # ARQ worker: drains the ledger stream into requests_log and keeps the
+  # monthly partitions provisioned ahead of time.
   worker:
     build:
       context: ./backend
-    command: ["python", "-c", "import time; print('worker idle until P2', flush=True); time.sleep(2**31)"]
+    command: ["arq", "apicost.worker.schedules.WorkerSettings"]
     environment: *backend-env
     volumes:
       - ./backend/src:/app/src

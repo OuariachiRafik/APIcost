@@ -89,7 +89,10 @@ the request still succeeds.
 |---|---|
 | Understand the whole request flow | `proxy/pipeline.py` — start here, always |
 | Add a new LLM provider | `proxy/providers/base.py`, then a new adapter next to it |
-| Change how streaming works | `proxy/streaming.py` |
+| Change how streaming works | `proxy/streaming.py` — the tee must never buffer |
+| Change proxy-key authentication | `proxy/auth.py` (data plane), `api/routers/proxy_keys.py` (revocation) |
+| Change the time budget or fail-open behavior | `core/deadline.py` |
+| Change what lands in the ledger | `ledger/writer.py` (emit) and `worker/tasks.py` (drain) |
 | Change what counts as a cache hit | `cache/semantic.py` (search) and `cache/policy.py` (eligibility) |
 | Change which model gets picked | `routing/engine.py`, `routing/rules.py`, `routing/classifier.py` |
 | Change how costs are computed | `ledger/cost.py` and `ledger/pricing.py` |
@@ -184,9 +187,38 @@ Break any of these and you have a serious incident, not a bug.
 3. **No local state in the proxy.** Everything shared lives in Redis or Postgres so any instance can
    serve any request and the tier scales horizontally.
 4. **Never block on logging.** Ledger writes go to a Redis stream and are drained by a worker. If the
-   stream is unavailable, drop the event and increment a counter — never fail the request.
+   stream is unavailable, drop the event and increment a counter — never fail the request. Stated
+   plainly: under a Redis outage we lose usage records rather than fail the user's request. Losing
+   observability is recoverable; taking down somebody's production application is not.
+
+   The drain uses a Redis **consumer group**, so an entry stays pending until acknowledged and a
+   worker that dies mid-batch leaves its entries to be reclaimed rather than dropping them.
 5. **Every request has a `request_id`**, bound to the logging context, written to the ledger, and
    returned in the `X-APICost-Request-Id` header. Without it, nobody can debug anything.
+
+---
+
+## 8b. Where fail-open stops
+
+Fail-open covers **optimizations**: cache, routing, stats, logging. It does not cover identity.
+
+- A proxy-key cache miss degrades to a Postgres read. A Postgres failure is a 503.
+- An unknown or revoked key is refused, always, however many subsystems are down.
+- `hard_stop` budgets (P6) fail *closed* — the one deliberate inversion in the system.
+
+`tests/e2e/test_fail_open.py` asserts both directions. Keep it green; it is the product's reliability
+guarantee in executable form.
+
+---
+
+## 8c. Two error shapes, on purpose
+
+The **control plane** returns RFC 7807 `application/problem+json` (BUILD_SPEC §8).
+
+The **data plane** returns OpenAI's `{"error": {...}}` envelope. The caller there is an SDK that
+expects the provider's error format; handing it problem+json would break error handling in exactly
+the applications we promised not to disturb. `main_proxy.py` overrides the shared handlers to do
+this — it is not an oversight.
 
 ---
 

@@ -18,6 +18,7 @@ budget, stats, alert, advisor, and billing tables arrive with their phases.
 from __future__ import annotations
 
 from datetime import datetime
+from decimal import Decimal
 from typing import TYPE_CHECKING
 
 from sqlalchemy import (
@@ -28,6 +29,7 @@ from sqlalchemy import (
     Index,
     Integer,
     LargeBinary,
+    Numeric,
     String,
     Text,
     func,
@@ -197,3 +199,55 @@ class ProxyKey(Base):
     project: Mapped[Project] = relationship(back_populates="proxy_keys")
 
     __table_args__ = (Index("ix_proxy_keys_project_revoked", "project_id", "revoked_at"),)
+
+
+class RequestLog(Base):
+    """The ledger — append-only system of record (CODEBASE_GUIDE §5).
+
+    The dashboard, the advisor, and every alert read from this table and
+    nowhere else. Partitioned monthly by ``timestamp``; the primary key is
+    ``(id, timestamp)`` because Postgres requires the partition key to be part
+    of it.
+
+    ``cost_would_have_been_usd`` is populated on every row, including
+    passthroughs. Every savings number in the product derives from it.
+    """
+
+    __tablename__ = "requests_log"
+
+    id: Mapped[str] = mapped_column(Text, primary_key=True, default=_ulid)
+    timestamp: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), primary_key=True, nullable=False, server_default=func.now()
+    )
+
+    user_id: Mapped[str] = mapped_column(Text, nullable=False, index=True)
+    project_id: Mapped[str] = mapped_column(Text, nullable=False, index=True)
+    request_id: Mapped[str] = mapped_column(Text, nullable=False)
+
+    endpoint: Mapped[str] = mapped_column(Text, nullable=False)
+    provider: Mapped[str] = mapped_column(Text, nullable=False)
+    model_requested: Mapped[str] = mapped_column(Text, nullable=False)
+    model_used: Mapped[str] = mapped_column(Text, nullable=False)
+
+    tokens_in: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    tokens_out: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    tokens_estimated: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+
+    cost_usd: Mapped[Decimal] = mapped_column(Numeric(20, 10), nullable=False, default=Decimal("0"))
+    cost_would_have_been_usd: Mapped[Decimal | None] = mapped_column(Numeric(20, 10), nullable=True)
+
+    latency_ms: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    ttft_ms: Mapped[float | None] = mapped_column(Float, nullable=True)
+    itl_ms: Mapped[float | None] = mapped_column(Float, nullable=True)
+    tps: Mapped[float | None] = mapped_column(Float, nullable=True)
+
+    cache_hit: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    cache_similarity: Mapped[float | None] = mapped_column(Float, nullable=True)
+    routed: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    routing_reason_code: Mapped[str | None] = mapped_column(Text, nullable=True)
+    routing_model_version: Mapped[str | None] = mapped_column(Text, nullable=True)
+    escalation_triggered: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+
+    status: Mapped[int] = mapped_column(Integer, nullable=False, default=200)
+    error_code: Mapped[str | None] = mapped_column(Text, nullable=True)
+    streamed: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)

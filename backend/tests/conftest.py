@@ -16,6 +16,7 @@ from collections.abc import AsyncIterator, Iterator
 from urllib.parse import urlparse
 
 import pytest
+import structlog
 from httpx import ASGITransport, AsyncClient
 
 from apicost.config import Settings, get_settings
@@ -40,6 +41,8 @@ def _reset_process_state(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     yield
     get_settings.cache_clear()
     clear_request_id()
+    # A test that pointed structlog at capsys must not leave it there.
+    structlog.reset_defaults()
 
 
 @pytest.fixture

@@ -83,6 +83,7 @@ def create_app(
     description: str,
     settings: Settings | None = None,
     enable_cors: bool = False,
+    on_shutdown: Callable[[], Awaitable[None]] | None = None,
 ) -> FastAPI:
     """Build an ASGI app with the shared logging, error, and health wiring."""
     cfg = settings or get_settings()
@@ -94,6 +95,8 @@ def create_app(
         try:
             yield
         finally:
+            if on_shutdown is not None:
+                await on_shutdown()
             await dispose_engine()
             await close_redis()
             _logger.info("service_stopped", service=service)

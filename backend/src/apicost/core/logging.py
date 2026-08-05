@@ -206,7 +206,10 @@ def configure_logging(
         processors=processors,
         wrapper_class=structlog.make_filtering_bound_logger(numeric_level),
         logger_factory=structlog.PrintLoggerFactory(file=sys.stdout),
-        cache_logger_on_first_use=True,
+        # Not cached: a bound logger captures the output stream it was built
+        # with, so caching makes reconfiguration a no-op for every logger that
+        # has already been used once. The per-call cost is a dict lookup.
+        cache_logger_on_first_use=False,
     )
 
     handler = logging.StreamHandler(stream=sys.stdout)
