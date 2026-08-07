@@ -19,6 +19,7 @@ from apicost.config import get_settings
 from apicost.core.logging import configure_logging, get_logger
 from apicost.db.redis import close_redis
 from apicost.db.session import dispose_engine
+from apicost.ledger.rollup import rebuild_rollups
 from apicost.worker.tasks import drain_ledger, ensure_partitions
 
 __all__ = ["WorkerSettings"]
@@ -31,6 +32,11 @@ async def drain_ledger_job(ctx: dict[str, Any]) -> int:
     return await drain_ledger(max_batches=10)
 
 
+async def rebuild_rollups_job(ctx: dict[str, Any]) -> int:
+    """Keep the usage rollups fresh (ADR 0006)."""
+    return await rebuild_rollups()
+
+
 async def ensure_partitions_job(ctx: dict[str, Any]) -> int:
     """Keep ``requests_log`` partitions provisioned ahead of time."""
     return await ensure_partitions()
@@ -41,6 +47,7 @@ async def startup(ctx: dict[str, Any]) -> None:
     configure_logging(level=settings.log_level, json_output=settings.log_json, service="worker")
     _logger.info("worker_starting", environment=settings.environment)
     await ensure_partitions()
+    await rebuild_rollups()
 
 
 async def shutdown(ctx: dict[str, Any]) -> None:
@@ -56,10 +63,17 @@ def _redis_settings() -> RedisSettings:
 class WorkerSettings:
     """ARQ configuration."""
 
-    functions: ClassVar[list[Any]] = [drain_ledger_job, ensure_partitions_job]
+    functions: ClassVar[list[Any]] = [
+        drain_ledger_job,
+        rebuild_rollups_job,
+        ensure_partitions_job,
+    ]
     cron_jobs: ClassVar[list[Any]] = [
         # Every 5 s: the ledger visibility target in BUILD_SPEC §4 P2.
         cron(drain_ledger_job, second={0, 5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55}),
+        # Every minute: aggregates lag by at most that, and the API reports
+        # how stale they are rather than implying they are live.
+        cron(rebuild_rollups_job, second={30}),
         # Daily, well ahead of the month boundary.
         cron(ensure_partitions_job, hour=3, minute=0),
     ]

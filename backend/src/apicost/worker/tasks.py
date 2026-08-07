@@ -224,19 +224,27 @@ async def drain_ledger(
     return written
 
 
-async def ensure_partitions(months_ahead: int = 3) -> int:
-    """Create ``requests_log`` partitions ahead of time.
+def _shift_month(year: int, month: int, delta: int) -> tuple[int, int]:
+    index = (year * 12 + (month - 1)) + delta
+    return index // 12, index % 12 + 1
 
-    The DEFAULT partition means falling behind is not lossy, but rows landing
-    there lose the pruning benefit of partitioning, so keep ahead.
+
+async def ensure_partitions(months_ahead: int = 3, months_back: int = 18) -> int:
+    """Maintain ``requests_log`` partitions either side of today.
+
+    Backward as well as forward, deliberately. Rows older than the newest
+    partition — a backfill, an import, a seeded database — otherwise land in
+    DEFAULT, which no range predicate can prune. That turns "last 30 days" into
+    a scan of all history; it was measured at 4.0 s against a 500 ms budget
+    before migration 0005 fixed it.
     """
     created = 0
     today = datetime.now(UTC).date()
-    year, month = today.year, today.month
+    year, month = _shift_month(today.year, today.month, -months_back)
 
-    for _ in range(months_ahead + 1):
+    for _ in range(months_back + months_ahead + 1):
         start = f"{year:04d}-{month:02d}-01"
-        end_year, end_month = (year + 1, 1) if month == 12 else (year, month + 1)
+        end_year, end_month = _shift_month(year, month, 1)
         end = f"{end_year:04d}-{end_month:02d}-01"
         name = f"requests_log_{year:04d}_{month:02d}"
 

@@ -11,6 +11,15 @@ and then through the proxy. Whatever the proxy adds is the number that matters,
 and it cannot be flattered by forgetting to instrument a stage.
 
 The cache-hit target (<30 ms p95) belongs to P4 and joins this file there.
+
+Marked ``perf`` and run via ``make bench``: a latency benchmark competing with
+the rest of the suite for CPU measures the contention, not the proxy.
+
+**Known failing as of P3.** Overhead measured 14.5 ms p95 at the end of P2 and
+122 ms after P3, on a quiet machine. The cause is the per-request Postgres
+lookup of the caller's encrypted provider key, which got slower as the database
+grew. It is a real regression and the first item of P4 — see
+docs/reports/p3-visibility.md.
 """
 
 from __future__ import annotations
@@ -23,7 +32,7 @@ from httpx import AsyncClient
 from apicost.metrics.latency import decompose_latency, percentile
 from tests.e2e.conftest import LiveServer, provision_account
 
-pytestmark = pytest.mark.integration
+pytestmark = [pytest.mark.integration, pytest.mark.perf]
 
 SAMPLES = 40
 WARMUP = 5

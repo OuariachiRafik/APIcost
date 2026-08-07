@@ -108,7 +108,8 @@ strict = true
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
-addopts = "-q --strict-markers"
+addopts = "-q --strict-markers -m 'not perf'"
 markers = [
     "integration: requires live Postgres and Redis (auto-skipped when unreachable)",
+    "perf: benchmark against a seeded ledger. Excluded by default because it needs 1M rows that the functional tests truncate. Run with: make bench",
 ]

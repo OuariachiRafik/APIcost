@@ -56,6 +56,11 @@ test: test-backend test-web ## Run the full suite (pytest + vitest)
 test-backend: ## pytest — integration tests skip when postgres/redis are down
 	$(BACKEND) pytest
 
+bench: ## Latency benchmark against a seeded ledger (needs `make dev`)
+	$(BACKEND) python scripts/seed.py --rows $(or $(rows),1000000) --rollup
+	$(BACKEND) pytest -m perf -s
+
+
 test-web: ## vitest
 	$(NPM) run test -- --run
 
@@ -94,6 +99,5 @@ revision: ## Autogenerate a migration: make revision m="add users"
 	@test -n "$(m)" || (echo 'usage: make revision m="describe the change"'; exit 1)
 	$(BACKEND) alembic revision --autogenerate -m "$(m)"
 
-seed: ## Demo user + synthetic ledger history
-	@echo "seed: nothing to seed yet — there is no schema until P1."
-	@echo "      Implemented alongside users/projects/requests_log in P1/P2."
+seed: ## Demo user + synthetic ledger history (rows=N to change volume)
+	$(BACKEND) python scripts/seed.py --rows $(or $(rows),50000)

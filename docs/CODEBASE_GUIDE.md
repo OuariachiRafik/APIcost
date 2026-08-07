@@ -97,6 +97,8 @@ the request still succeeds.
 | Change which model gets picked | `routing/engine.py`, `routing/rules.py`, `routing/classifier.py` |
 | Change how costs are computed | `ledger/cost.py` and `ledger/pricing.py` |
 | Add a dashboard endpoint | `api/routers/` + a migration if it needs new data |
+| Change a usage or spend number | `ledger/rollup.py` — aggregates come from rollups, not raw rows ([ADR 0006](adr/0006-usage-rollups.md)) |
+| Change the request log | `api/routers/requests.py` — reads `requests_log` live, deliberately |
 | Change a spend chart | `web/src/routes/` + `web/src/lib/api.ts` |
 | Add a scheduled job | `worker/tasks.py` + `worker/schedules.py` |
 | Touch encryption | `vault/kms.py`, `vault/provider_keys.py` — read §7 first |
@@ -127,7 +129,8 @@ the request still succeeds.
 | **Fail-open** | On internal failure, forward the original request unmodified rather than erroring. The single most important behavior in the system. |
 | **Reason code** | Machine-readable explanation of a routing/caching decision, shown to the user (`RULE_OVERRIDE`, `CLASSIFIER_CHEAP_TIER`, `ESCALATED_LOW_CONFIDENCE`, `FAILOPEN_TIMEOUT`, ...). |
 | **`cost_would_have_been_usd`** | What the request *would* have cost at the requested model's price. Every savings number in the product is derived from this column. |
-| **Ledger** | `requests_log`. Append-only system of record. Dashboard, advisor, and alerting all read from it and nowhere else. |
+| **Ledger** | `requests_log`. Append-only system of record. Everything else is derived from it. |
+| **Rollup** | `usage_rollup_daily` / `token_bucket_rollup_daily`. Pre-aggregated spend, rebuilt by the worker. Derived and disposable — dropping them loses nothing. |
 
 ---
 
@@ -307,6 +310,12 @@ present.
   history at today's prices would misstate what the user actually paid.
 - **Peer benchmark is missing for a user.** Cohorts with fewer than 50 users are suppressed for
   privacy.
+- **The dashboard's totals lag the request log by up to a minute.** Aggregates are served from
+  rollups rebuilt on a schedule; the request log reads `requests_log` live. A request that just
+  completed appears in the log before it appears in the chart. That is the intended tradeoff — see
+  ADR 0006 — and the reason the request log deliberately does *not* share the rollups' failure mode.
+- **`median_tokens_bucket` is a bucket floor, not a median.** Percentiles derived from a histogram
+  cannot be exact. The field name says so.
 
 ---
 

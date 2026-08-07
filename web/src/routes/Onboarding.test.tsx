@@ -4,11 +4,12 @@
  */
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { render, screen, waitFor } from '@testing-library/react';
+import { createMemoryRouter, RouterProvider } from 'react-router-dom';
 import userEvent from '@testing-library/user-event';
-import type { ReactNode } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { AuthProvider } from '../lib/auth';
+import { Onboarding } from './Onboarding';
 import { Root } from './Root';
 
 const PROVIDER_KEY = 'sk-proj-TestProviderKey0123456789';
@@ -78,11 +79,18 @@ function stubApi(overrides: Record<string, () => Response> = {}) {
   return fetchMock;
 }
 
-function renderApp(ui: ReactNode = <Root />) {
+function renderApp() {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  // A memory router so the shell renders its Outlet without touching history.
+  const router = createMemoryRouter(
+    [{ path: '/', element: <Root />, children: [{ index: true, element: <Onboarding /> }] }],
+    { initialEntries: ['/'] },
+  );
   return render(
     <QueryClientProvider client={client}>
-      <AuthProvider>{ui}</AuthProvider>
+      <AuthProvider>
+        <RouterProvider router={router} />
+      </AuthProvider>
     </QueryClientProvider>,
   );
 }
