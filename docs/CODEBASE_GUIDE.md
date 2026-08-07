@@ -157,6 +157,11 @@ Break any of these and you have a serious incident, not a bug.
 
 1. Provider keys exist in plaintext only in process memory, only during a forward, and are zeroed
    after. Never in a log, a response, an exception message, a stack trace, or a DB column.
+
+   The *encrypted* blob is cached in Redis for the hot path (`vault/provider_keys.py`). That is
+   ciphertext plus a KMS-wrapped data key — inert without the KMS — and it is purged in the same
+   operation as any delete or rotation, exactly as proxy-key revocation is. Never cache the
+   decrypted key, anywhere, for any reason.
 2. Proxy keys are stored as SHA-256 hashes. Revocation must invalidate the Redis auth cache in the
    same operation as the DB write, or a revoked key keeps working for up to 60 seconds.
 3. Every user-scoped query is bounded by `user_id` **and** protected by Postgres row-level security.

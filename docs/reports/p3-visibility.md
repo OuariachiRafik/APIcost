@@ -63,7 +63,7 @@ intended.
   §3 assumes nine routes; this is an addition where the spec was silent, not a substitution.
 - [ADR 0006](../adr/0006-usage-rollups.md) — daily rollups, with the measurements that forced them.
 
-## Open — a regression I found but did not fix
+## The regression, and how it was fixed
 
 **Proxy overhead went from 14.5 ms p95 (end of P2) to 122 ms (end of P3)**, measured on a quiet
 machine, against a 100 ms NFR. This is real, not benchmark noise — it reproduces in isolation.
@@ -83,12 +83,26 @@ key material*, and every option has a security consequence worth thinking about 
 - caching in-process conflicts with "no local state in the proxy" (§8.3) and means a deleted provider
   key keeps working until the TTL lapses.
 
-Rushing that decision at the end of a long session, on the most security-sensitive path in the
-system, is how a real vulnerability gets introduced. **This is the first item of P4.**
+**Resolved.** The encrypted blob is now cached in Redis, and the measured overhead went
+**122 ms → 5.9 ms** — better than P2's 14.5 ms, because the hot path now makes *zero* Postgres
+queries, which is what CODEBASE_GUIDE §2 asked for all along.
 
-The benchmark still asserts the 100 ms budget and still fails — it is marked `perf` and excluded from
-the default suite because a latency benchmark competing with the rest of the suite measures
-contention, not the proxy. It is not silenced: `make bench` fails today, deliberately.
+Why Redis rather than in-process:
+
+- What is cached is AES-256-GCM ciphertext plus a KMS-wrapped data key. An attacker holding the
+  whole Redis dataset ends up exactly where a stolen Postgres dump leaves them — nowhere, without
+  the KMS master key. There is a test asserting precisely this.
+- In-process caching is narrower exposure but strictly worse security: it breaks "no local state in
+  the proxy" (§8.3) and, more importantly, a **deleted provider key would keep working** per
+  instance with no way to purge it.
+- Deletion and rotation purge the cache in the same operation as the database write — the contract
+  proxy-key revocation already meets (UC-07). A removed key stops working immediately, not when a
+  TTL lapses.
+
+`tests/integration/test_provider_key_cache.py` covers the security properties rather than the speed:
+no plaintext anywhere in Redis, the blob is undecryptable with the wrong master key, deletion purges
+immediately, rotation clears stale entries, keys are scoped per user *and* provider, and a dead
+Redis falls back to Postgres rather than failing the request.
 
 ## Also open
 

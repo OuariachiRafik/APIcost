@@ -20,7 +20,12 @@ from apicost.core.errors import ConflictError, NotFoundError
 from apicost.core.ids import new_id
 from apicost.core.logging import get_logger
 from apicost.db.models import ProviderKey
-from apicost.vault.provider_keys import encrypt_provider_key, last4
+from apicost.db.redis import get_redis
+from apicost.vault.provider_keys import (
+    encrypt_provider_key,
+    last4,
+    purge_provider_key_cache,
+)
 
 router = APIRouter(prefix="/keys", tags=["keys"])
 
@@ -85,6 +90,10 @@ async def add_key(
     session.add(key)
     await session.flush()
 
+    # A previous key for this provider may still be cached from before it was
+    # deleted; make sure the new one is what gets used.
+    await purge_provider_key_cache(get_redis(), user.id, payload.provider)
+
     # Note what happened, never what the key was.
     _logger.info("provider_key_added", user_id=user.id, provider=payload.provider, key_id=key.id)
 
@@ -134,6 +143,12 @@ async def delete_key(key_id: str, user: CurrentUser, session: DbSession) -> None
         raise NotFoundError("Provider key not found")
 
     await session.delete(key)
+
+    # Same operation as the database write. A key the user removed must stop
+    # working promptly, not when a cache entry happens to expire — the same
+    # contract proxy-key revocation meets (UC-07).
+    await purge_provider_key_cache(get_redis(), user.id, key.provider)
+
     _logger.info(
         "provider_key_deleted",
         user_id=user.id,

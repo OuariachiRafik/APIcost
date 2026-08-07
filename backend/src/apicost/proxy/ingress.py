@@ -35,7 +35,11 @@ from apicost.proxy.providers.base import Provider
 from apicost.proxy.providers.gemini import GeminiProvider
 from apicost.proxy.providers.openai import OpenAIProvider
 from apicost.vault.kms import get_kms_client
-from apicost.vault.provider_keys import EncryptedProviderKey
+from apicost.vault.provider_keys import (
+    EncryptedProviderKey,
+    cache_provider_key,
+    load_cached_provider_key,
+)
 
 __all__ = ["build_proxy_request", "router"]
 
@@ -80,8 +84,23 @@ def build_provider(name: str, settings: Settings) -> Provider:
     return provider_class(override)
 
 
-async def _load_provider_key(user_id: str, provider_name: str) -> EncryptedProviderKey:
-    """Fetch the caller's stored key for a provider, still encrypted."""
+async def _load_provider_key(
+    user_id: str, provider_name: str, settings: Settings
+) -> EncryptedProviderKey:
+    """Fetch the caller's stored key for a provider, still encrypted.
+
+    Redis first. This runs on every proxied request, and going to Postgres for
+    it put ~15 ms on the critical path — the data plane is not supposed to
+    query Postgres at all (CODEBASE_GUIDE §2). What is cached is ciphertext
+    plus a KMS-wrapped data key; see vault/provider_keys.py for why that is
+    safe and what purges it.
+    """
+    redis = get_redis(settings)
+
+    cached = await load_cached_provider_key(redis, user_id, provider_name)
+    if cached is not None:
+        return cached
+
     async with session_scope(user_id=user_id) as session:
         result = await session.execute(
             select(ProviderKey).where(
@@ -97,11 +116,13 @@ async def _load_provider_key(user_id: str, provider_name: str) -> EncryptedProvi
             f"No active {provider_name} key on file. Add one in the dashboard first."
         )
 
-    return EncryptedProviderKey(
+    encrypted = EncryptedProviderKey(
         encrypted_key=stored.encrypted_key,
         wrapped_data_key=stored.wrapped_data_key,
         nonce=stored.nonce,
     )
+    await cache_provider_key(redis, user_id, provider_name, encrypted)
+    return encrypted
 
 
 async def build_proxy_request(
@@ -131,7 +152,7 @@ async def build_proxy_request(
         body=body,
         resolved=resolved,
         provider=build_provider(provider_name, settings),
-        encrypted_key=await _load_provider_key(resolved.user_id, provider_name),
+        encrypted_key=await _load_provider_key(resolved.user_id, provider_name, settings),
         kms=get_kms_client(settings),
         settings=settings,
         stream=bool(body.get("stream", False)),

@@ -12,22 +12,36 @@ CODEBASE_GUIDE §7.1):
 
 from __future__ import annotations
 
+import base64
+import binascii
+import json
 import os
 from collections.abc import Iterator
 from contextlib import contextmanager
-from typing import Final
+from typing import TYPE_CHECKING, Final
 
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 from apicost.core.errors import APICostError
+from apicost.core.logging import get_logger
 from apicost.vault.kms import KMSClient
 
+if TYPE_CHECKING:
+    from redis.asyncio import Redis
+
+_logger = get_logger(__name__)
+
 __all__ = [
+    "PROVIDER_KEY_CACHE_TTL_SECONDS",
     "EncryptedProviderKey",
     "ProviderKeyError",
+    "cache_provider_key",
     "decrypt_provider_key",
     "encrypt_provider_key",
     "last4",
+    "load_cached_provider_key",
+    "provider_key_cache_key",
+    "purge_provider_key_cache",
     "zeroed",
 ]
 
@@ -120,3 +134,90 @@ async def decrypt_provider_key(kms: KMSClient, stored: EncryptedProviderKey) -> 
             data_key[index] = 0
 
     return plaintext.decode()
+
+
+# ---------------------------------------------------------------------------
+# Hot-path cache
+# ---------------------------------------------------------------------------
+#
+# The proxy needs this blob on every request, and fetching it from Postgres
+# each time put ~15 ms on the critical path — the data plane is not supposed to
+# touch Postgres at all (CODEBASE_GUIDE §2).
+#
+# What goes into Redis is **ciphertext plus a KMS-wrapped data key**, never
+# plaintext and never the data key itself. A Redis compromise yields nothing
+# without the KMS master key, which is the same position a stolen Postgres dump
+# leaves an attacker in — the threat model envelope encryption already assumes.
+#
+# The staleness this introduces is bounded two ways: a 60 s TTL, and an
+# explicit purge in the same operation as any delete or rotation. That is the
+# same contract proxy-key revocation already meets (UC-07), and for the same
+# reason: a credential the user removed must stop working promptly.
+
+PROVIDER_KEY_CACHE_PREFIX: Final = "apicost:pk:"
+PROVIDER_KEY_CACHE_TTL_SECONDS: Final = 60
+
+
+def provider_key_cache_key(user_id: str, provider: str) -> str:
+    return f"{PROVIDER_KEY_CACHE_PREFIX}{user_id}:{provider}"
+
+
+async def cache_provider_key(
+    redis: Redis, user_id: str, provider: str, stored: EncryptedProviderKey
+) -> None:
+    """Cache the encrypted blob. Failures are swallowed — this is an optimization."""
+    payload = json.dumps(
+        {
+            "k": base64.b64encode(stored.encrypted_key).decode(),
+            "w": base64.b64encode(stored.wrapped_data_key).decode(),
+            "n": base64.b64encode(stored.nonce).decode(),
+        },
+        separators=(",", ":"),
+    )
+    try:
+        await redis.set(
+            provider_key_cache_key(user_id, provider),
+            payload,
+            ex=PROVIDER_KEY_CACHE_TTL_SECONDS,
+        )
+    except Exception:
+        _logger.debug("provider_key_cache_write_failed", subsystem="vault")
+
+
+async def load_cached_provider_key(
+    redis: Redis, user_id: str, provider: str
+) -> EncryptedProviderKey | None:
+    """Read the cached blob, or ``None`` on a miss or any failure."""
+    try:
+        raw = await redis.get(provider_key_cache_key(user_id, provider))
+    except Exception:
+        _logger.warning("provider_key_cache_read_failed", subsystem="vault")
+        return None
+
+    if not raw:
+        return None
+
+    try:
+        data = json.loads(raw)
+        return EncryptedProviderKey(
+            encrypted_key=base64.b64decode(data["k"]),
+            wrapped_data_key=base64.b64decode(data["w"]),
+            nonce=base64.b64decode(data["n"]),
+        )
+    except (json.JSONDecodeError, KeyError, TypeError, ValueError, binascii.Error):
+        # An entry written by an older shape. Treat as a miss rather than
+        # serving something half-understood.
+        return None
+
+
+async def purge_provider_key_cache(redis: Redis, user_id: str, provider: str) -> None:
+    """Drop a cached key.
+
+    Must run in the same operation as the database delete or rotation. Without
+    it, a key the user removed keeps being usable for up to the TTL — the exact
+    failure UC-07 exists to prevent, one layer down.
+    """
+    try:
+        await redis.delete(provider_key_cache_key(user_id, provider))
+    except Exception:
+        _logger.warning("provider_key_cache_purge_failed", subsystem="vault")
