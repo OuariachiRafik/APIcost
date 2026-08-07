@@ -35,7 +35,6 @@ often than it is edited.
 
 from __future__ import annotations
 
-import asyncio
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass, field
@@ -59,6 +58,7 @@ from apicost.ledger.cost import compute_cost, cost_would_have_been
 from apicost.ledger.pricing import PriceNotFoundError
 from apicost.ledger.writer import LedgerEvent, emit_ledger_event
 from apicost.metrics.inference import compute_inference_metrics
+from apicost.metrics.latency import StageTimer
 from apicost.proxy.auth import ResolvedKey
 from apicost.proxy.providers.base import (
     Provider,
@@ -140,6 +140,9 @@ async def run_pipeline(request: ProxyRequest) -> PipelineResult:
     started = time.perf_counter()
     deadline = Deadline(budget_ms=float(request.settings.optimization_budget_ms))
 
+    timer = StageTimer()
+    timer.start(started)
+
     model_requested = request.model_requested
     model_used = model_requested
 
@@ -161,6 +164,8 @@ async def run_pipeline(request: ProxyRequest) -> PipelineResult:
     if decision.cacheable:
         normalized = normalize_prompt(request.body)
 
+        timer.mark("policy", time.perf_counter())
+
         # Exact hash first: no embedding, and no database session. The
         # repeat-prompt case is the common one, and neither cost is needed to
         # answer it — that is the whole point of §6.3's two-tier design.
@@ -174,8 +179,10 @@ async def run_pipeline(request: ProxyRequest) -> PipelineResult:
                 project_id=request.resolved.project_id,
                 normalized_prompt=normalized,
             )
+            timer.mark("cache_lookup", time.perf_counter())
             if hit is not None:
                 await record_hit(get_redis(request.settings), hit.entry_id)
+                timer.mark("record_hit", time.perf_counter())
         if guard.failed:
             hit = None
 
@@ -214,7 +221,7 @@ async def run_pipeline(request: ProxyRequest) -> PipelineResult:
 
     if hit is not None:
         # The provider is never called. This is the whole point.
-        return await _serve_from_cache(request, hit, started)
+        return await _serve_from_cache(request, hit, started, timer)
 
     # -- [4] Routing --------------------------------------------------- P5 --
     # with failopen("routing", deadline) as guard:
@@ -476,6 +483,7 @@ async def _record(
     cache_hit: bool = False,
     cache_similarity: float | None = None,
     cost_override: str | None = None,
+    timer: StageTimer | None = None,
 ) -> None:
     """Build and enqueue the ledger event. Never raises."""
     now = datetime.now(UTC)
@@ -529,9 +537,19 @@ async def _record(
         routing_reason_code=REASON_CACHE_HIT if cache_hit else REASON_PASSTHROUGH,
     )
 
+    if timer is not None:
+        timer.mark("ledger_build", time.perf_counter())
+
     from apicost.db.redis import get_redis
 
-    await emit_ledger_event(get_redis(), event, request.settings)
+    redis = get_redis()
+    if timer is not None:
+        timer.mark("ledger_client", time.perf_counter())
+
+    await emit_ledger_event(redis, event, request.settings)
+
+    if timer is not None:
+        timer.mark("ledger_emit", time.perf_counter())
 
 
 async def _record_stream(
@@ -628,7 +646,12 @@ def new_pipeline_request_id() -> str:
     return new_request_id()
 
 
-async def _serve_from_cache(request: ProxyRequest, hit: CacheHit, started: float) -> PipelineResult:
+async def _serve_from_cache(
+    request: ProxyRequest,
+    hit: CacheHit,
+    started: float,
+    timer: StageTimer | None = None,
+) -> PipelineResult:
     """Return a cached response without calling the provider.
 
     The saving recorded here is the *whole* cost the request would have
@@ -636,22 +659,26 @@ async def _serve_from_cache(request: ProxyRequest, hit: CacheHit, started: float
     """
     latency_ms = (time.perf_counter() - started) * 1000.0
 
-    # Ledgering is bookkeeping; the answer is already known. Running it
-    # concurrently rather than before the return keeps it off the measured
-    # path, where it was costing a Redis round trip against a 30 ms budget.
-    await asyncio.gather(
-        _record(
-            request,
-            model_used=hit.model_used,
-            usage=Usage(hit.tokens_in, hit.tokens_out, estimated=False),
-            latency_ms=latency_ms,
-            status=200,
-            cache_hit=True,
-            cache_similarity=hit.similarity,
-            cost_override="0",
-        ),
-        return_exceptions=True,
+    # Ledgering is bookkeeping, but it still has to happen before we return —
+    # a fire-and-forget task here would race the response and could be dropped
+    # on shutdown. It costs one Redis round trip.
+    if timer is not None:
+        timer.mark("respond", time.perf_counter())
+
+    await _record(
+        request,
+        model_used=hit.model_used,
+        usage=Usage(hit.tokens_in, hit.tokens_out, estimated=False),
+        latency_ms=latency_ms,
+        status=200,
+        cache_hit=True,
+        cache_similarity=hit.similarity,
+        cost_override="0",
+        timer=timer,
     )
+
+    if timer is not None:
+        timer.mark("ledger", time.perf_counter())
 
     _logger.info(
         "cache_hit",
@@ -659,6 +686,7 @@ async def _serve_from_cache(request: ProxyRequest, hit: CacheHit, started: float
         similarity=round(hit.similarity, 4),
         exact=hit.exact,
         latency_ms=round(latency_ms, 2),
+        **(timer.as_log_fields() if timer is not None else {}),
     )
 
     headers = _metadata_headers(request, hit.model_used, cache_hit=True)

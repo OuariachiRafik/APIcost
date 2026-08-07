@@ -345,7 +345,25 @@ async def store(
     # Point the exact-match path at it, with the same TTL so the two cannot
     # disagree about whether an entry is live.
     try:
-        await redis.set(exact_cache_key(user_id, project_id, digest), entry_id, ex=ttl_seconds)
+        # The exact path serves straight from Redis, so the entry carries the
+        # ciphertext rather than a pointer to the Postgres row. Same TTL as the
+        # row, so the two cannot disagree about whether the entry is live.
+        await redis.set(
+            exact_cache_key(user_id, project_id, digest),
+            json.dumps(
+                {
+                    "i": entry_id,
+                    "p": base64.b64encode(encrypted.encrypted_key).decode(),
+                    "w": base64.b64encode(encrypted.wrapped_data_key).decode(),
+                    "n": base64.b64encode(encrypted.nonce).decode(),
+                    "m": model_used,
+                    "ti": tokens_in,
+                    "to": tokens_out,
+                },
+                separators=(",", ":"),
+            ),
+            ex=ttl_seconds,
+        )
     except Exception:
         _logger.debug("cache_exact_index_failed", subsystem="cache")
 

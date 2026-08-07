@@ -12,4 +12,4 @@ would otherwise have shipped looking correct, along with why they were invisible
 | P1 | [Auth, projects, keys, vault](p1-auth-and-vault.md) | ✅ complete |
 | P2 | [Proxy passthrough & ledger](p2-proxy-and-ledger.md) | ✅ complete |
 | P3 | [Visibility & reporting](p3-visibility.md) | ✅ complete |
-| P4 | [Semantic caching](p4-semantic-caching.md) | ⚠️ implemented, 2 items open |
+| P4 | [Semantic caching](p4-semantic-caching.md) | ✅ complete |

@@ -33,6 +33,7 @@ __all__ = [
     "DIVERGENCE_THRESHOLD",
     "LatencyDecomposition",
     "StageStats",
+    "StageTimer",
     "decompose_latency",
     "percentile",
 ]
@@ -192,3 +193,33 @@ def decompose_latency(
         divergence=divergence,
         diverged=diverged,
     )
+
+
+@dataclass
+class StageTimer:
+    """Accumulates per-stage durations for one request.
+
+    Pure bookkeeping over ``time.perf_counter`` — no I/O, so this stays inside
+    the pure-function core. The pipeline feeds it, the log line reports it, and
+    :func:`decompose_latency` aggregates a batch of them.
+
+    This exists because guessing at where request time goes is how a 30 ms
+    budget quietly becomes 40. Stages are the ones named in BUILD_SPEC §6.6.
+    """
+
+    stages: dict[str, float] = field(default_factory=dict)
+    _started: float = 0.0
+
+    def start(self, clock: float) -> None:
+        self._started = clock
+
+    def mark(self, stage: str, clock: float) -> None:
+        """Record time elapsed since the previous mark as ``stage``."""
+        self.stages[stage] = (clock - self._started) * 1000.0
+        self._started = clock
+
+    def total_ms(self) -> float:
+        return sum(self.stages.values())
+
+    def as_log_fields(self) -> dict[str, float]:
+        return {f"t_{name}": round(value, 2) for name, value in self.stages.items()}

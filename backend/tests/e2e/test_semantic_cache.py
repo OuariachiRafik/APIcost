@@ -13,6 +13,7 @@ actually recognises equivalent prompts, which is the entire feature.
 from __future__ import annotations
 
 import time
+from collections.abc import Iterator
 from decimal import Decimal
 from typing import Any
 
@@ -22,6 +23,7 @@ from openai import AsyncOpenAI
 from sqlalchemy import text
 
 from apicost.cache.embeddings import embedding_is_ready, warm_embedder
+from apicost.config import get_settings
 from apicost.db.session import get_admin_engine
 from apicost.metrics.latency import percentile
 from apicost.worker.tasks import drain_ledger
@@ -31,13 +33,44 @@ from tests.e2e.stub_provider import COMPLETION_TEXT
 pytestmark = pytest.mark.integration
 
 
+# Measured at cosine 0.9812 with bge-small-en-v1.5: decisively above the 0.95
+# default and decisively below 0.99, so both threshold assertions have margin.
+# The previous pair ("What is the capital city of France?" / "Which city is the
+# capital of France?") scored 0.9929 — three thousandths above the 0.99 the
+# threshold test asserts a miss for, which is why that test flapped.
+QUESTION = "What causes rain?"
+EQUIVALENT_QUESTION = "Why does it rain?"
+
+
 @pytest.fixture(scope="module", autouse=True)
-def _require_embedder() -> None:
-    """Skip rather than pass vacuously when the model is unavailable."""
+def _require_embedder() -> Iterator[None]:
+    """Skip rather than pass vacuously when the model is unavailable.
+
+    Also widens the embedding budget for this module. The default 40 ms is the
+    production figure and embedding measures ~14 ms on a quiet machine, but
+    under a full test run it can overrun — and then the pipeline correctly
+    skips the cache write, leaving the next assertion looking at an empty
+    cache. Widening it here tests the caching behaviour rather than the host's
+    spare CPU.
+    """
     import asyncio
+    import os
+
+    previous = os.environ.get("APICOST_EMBEDDING_BUDGET_MS")
+    os.environ["APICOST_EMBEDDING_BUDGET_MS"] = "2000"
+    get_settings.cache_clear()
 
     if not asyncio.run(warm_embedder()):
         pytest.skip("embedding model unavailable — install the `ml` dependency group")
+
+    try:
+        yield
+    finally:
+        if previous is None:
+            os.environ.pop("APICOST_EMBEDDING_BUDGET_MS", None)
+        else:
+            os.environ["APICOST_EMBEDDING_BUDGET_MS"] = previous
+        get_settings.cache_clear()
 
 
 def sdk(proxy: LiveServer, key: str) -> AsyncOpenAI:
@@ -79,12 +112,12 @@ async def test_equivalent_prompts_hit_at_the_default_threshold(
     key = await provision_account(api_base, "cache-hit@example.com")
     client = sdk(live_proxy, key)
 
-    first = await ask(client, "What is the capital city of France?")
+    first = await ask(client, QUESTION)
     assert first.choices[0].message.content == COMPLETION_TEXT
     assert await cache_entry_count() == 1
 
     # Different words, same question.
-    second = await ask(client, "Which city is the capital of France?")
+    second = await ask(client, EQUIVALENT_QUESTION)
     assert second.choices[0].message.content == COMPLETION_TEXT
 
     await drain_ledger(block_ms=100)
@@ -104,12 +137,12 @@ async def test_raising_the_threshold_turns_the_hit_into_a_miss(
     key = await provision_account(api_base, email)
     client = sdk(live_proxy, key)
 
-    await ask(client, "What is the capital city of France?")
+    await ask(client, QUESTION)
 
-    # 0.99 admits only near-identical prompts.
+    # 0.99 admits only near-identical prompts; the pair scores 0.9812.
     await set_threshold(api_base, email, 0.99)
 
-    await ask(client, "Which city is the capital of France?")
+    await ask(client, EQUIVALENT_QUESTION)
 
     await drain_ledger(block_ms=100)
     async with get_admin_engine().connect() as conn:
@@ -151,7 +184,7 @@ async def test_unrelated_prompts_do_not_collide(
     key = await provision_account(api_base, "cache-nocollide@example.com")
     client = sdk(live_proxy, key)
 
-    await ask(client, "What is the capital city of France?")
+    await ask(client, QUESTION)
     await ask(client, "How do I sort a list in Python?")
 
     await drain_ledger(block_ms=100)
@@ -214,8 +247,8 @@ async def test_one_users_cache_is_not_visible_to_another(
     key_a = await provision_account(api_base, "cache-tenant-a@example.com")
     key_b = await provision_account(api_base, "cache-tenant-b@example.com")
 
-    await ask(sdk(live_proxy, key_a), "What is the capital city of France?")
-    await ask(sdk(live_proxy, key_b), "What is the capital city of France?")
+    await ask(sdk(live_proxy, key_a), QUESTION)
+    await ask(sdk(live_proxy, key_b), QUESTION)
 
     await drain_ledger(block_ms=100)
     async with get_admin_engine().connect() as conn:
@@ -234,7 +267,7 @@ async def test_cached_payloads_are_encrypted_at_rest(
 ) -> None:
     """BUILD_SPEC §0.4 — the one place response text is stored."""
     key = await provision_account(api_base, "cache-encrypted@example.com")
-    await ask(sdk(live_proxy, key), "What is the capital city of France?")
+    await ask(sdk(live_proxy, key), QUESTION)
 
     async with get_admin_engine().connect() as conn:
         row = (
@@ -287,9 +320,9 @@ async def test_savings_reconcile_exactly_with_the_ledger(
     key = await provision_account(api_base, email)
     client = sdk(live_proxy, key)
 
-    await ask(client, "What is the capital city of France?")
+    await ask(client, QUESTION)
     for _ in range(3):
-        await ask(client, "What is the capital city of France?")
+        await ask(client, QUESTION)
 
     await drain_ledger(block_ms=200)
 
@@ -314,20 +347,16 @@ async def test_savings_reconcile_exactly_with_the_ledger(
     assert Decimal(str(avoided)) > 0, "no avoided cost was recorded"
 
 
-@pytest.mark.perf
 @pytest.mark.usefixtures("clean_all")
 async def test_cache_hits_are_fast(live_proxy: LiveServer, api_base: AsyncClient) -> None:
     """The <30 ms p95 NFR, measured against the exact-hash path.
 
-    **Currently failing at 36-48 ms**, and the gap is not fully explained. The
-    measured floor on this machine is 1.8 ms of HTTP and 0.45 ms per Redis
-    round trip, and the hit path makes five of those — so the work should cost
-    well under 10 ms. Something on the path costs ~30 ms that profiling has not
-    yet accounted for.
-
-    Marked `perf` so it does not fail the functional suite, but it is not
-    silenced: `make bench` runs it and it is red. See
-    docs/reports/p4-semantic-caching.md.
+    Kept in the functional suite rather than behind `perf`, because it is
+    exactly the regression that hid here before: `store` wrote one format and
+    `lookup_exact` read another, so every exact lookup missed and fell through
+    to embedding plus a vector search. Nothing behavioural changed — the cache
+    still returned the right answer — it just cost 30 ms more. A latency
+    assertion was the only thing that could notice.
     """
     key = await provision_account(api_base, "cache-latency@example.com")
     prompt = "Summarise the theory of plate tectonics"
