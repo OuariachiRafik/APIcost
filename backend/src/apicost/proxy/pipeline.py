@@ -35,19 +35,26 @@ often than it is edited.
 
 from __future__ import annotations
 
+import asyncio
 import time
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
 
 import httpx
 
+from apicost.cache.embeddings import embed
+from apicost.cache.policy import is_cacheable, normalize_prompt
+from apicost.cache.semantic import CacheHit, lookup_exact, lookup_similar, record_hit
+from apicost.cache.semantic import store as semantic_store
 from apicost.config import Settings
-from apicost.core.deadline import Deadline
+from apicost.core.deadline import Deadline, failopen
 from apicost.core.errors import UpstreamError
 from apicost.core.ids import new_request_id
 from apicost.core.logging import get_logger
+from apicost.db.redis import get_redis
+from apicost.db.session import session_scope
 from apicost.ledger.cost import compute_cost, cost_would_have_been
 from apicost.ledger.pricing import PriceNotFoundError
 from apicost.ledger.writer import LedgerEvent, emit_ledger_event
@@ -59,7 +66,7 @@ from apicost.proxy.providers.base import (
     estimate_tokens,
     get_http_client,
 )
-from apicost.proxy.streaming import StreamCapture, tee_stream
+from apicost.proxy.streaming import StreamCapture, replay_as_sse, tee_stream
 from apicost.vault.kms import KMSClient
 from apicost.vault.provider_keys import EncryptedProviderKey, decrypt_provider_key
 
@@ -68,6 +75,7 @@ __all__ = ["PipelineResult", "ProxyRequest", "run_pipeline"]
 _logger = get_logger(__name__)
 
 REASON_PASSTHROUGH = "PASSTHROUGH"
+REASON_CACHE_HIT = "CACHE_HIT"
 """P5 introduces the rest of the reason-code vocabulary (UC-16)."""
 
 
@@ -80,15 +88,32 @@ class ProxyRequest:
     body: dict[str, Any]
     resolved: ResolvedKey
     provider: Provider
-    encrypted_key: EncryptedProviderKey
+    load_encrypted_key: Callable[[], Awaitable[EncryptedProviderKey]]
+    """Deferred. A cache hit never forwards, so it should never fetch key
+    material — both a latency win and one less place a key is handled."""
+
     kms: KMSClient
     settings: Settings
     stream: bool = False
+    headers: dict[str, str] = field(default_factory=dict)
+    """Inbound request headers, for the X-APICost-No-Cache marker (UC-24)."""
 
     @property
     def model_requested(self) -> str:
         model = self.body.get("model")
         return model if isinstance(model, str) else "unknown"
+
+
+@dataclass
+class _CacheContext:
+    """What a cache write needs, carried from lookup to after the response.
+
+    Only populated when the request was cacheable *and* the embedding
+    succeeded — there is no point forwarding a prompt we cannot index.
+    """
+
+    normalized_prompt: str
+    embedding: list[float]
 
 
 @dataclass
@@ -118,10 +143,78 @@ async def run_pipeline(request: ProxyRequest) -> PipelineResult:
     model_requested = request.model_requested
     model_used = model_requested
 
-    # -- [3] Semantic cache ------------------------------------------- P4 --
-    # with failopen("cache", deadline) as guard:
-    #     hit = await semantic_cache.lookup(...)
-    #     if guard.ok and hit: return _replay(hit)
+    # -- [3] Semantic cache -------------------------------------------------
+    #
+    # Everything here is inside failopen: a cache that raises, hangs, or blows
+    # the budget results in a normal provider call, never an error.
+    decision = is_cacheable(
+        request.body,
+        headers=request.headers,
+        cache_enabled=request.resolved.cache_enabled,
+        endpoint=request.endpoint,
+    )
+
+    normalized = ""
+    embedding: list[float] | None = None
+    hit: CacheHit | None = None
+
+    if decision.cacheable:
+        normalized = normalize_prompt(request.body)
+
+        # Exact hash first: no embedding, and no database session. The
+        # repeat-prompt case is the common one, and neither cost is needed to
+        # answer it — that is the whole point of §6.3's two-tier design.
+        # Opening a session alone costs a BEGIN, a set_config and a COMMIT,
+        # which was most of the gap to the 30 ms hit budget.
+        async with failopen("cache_lookup", deadline) as guard:
+            hit = await lookup_exact(
+                get_redis(request.settings),
+                request.kms,
+                user_id=request.resolved.user_id,
+                project_id=request.resolved.project_id,
+                normalized_prompt=normalized,
+            )
+            if hit is not None:
+                await record_hit(get_redis(request.settings), hit.entry_id)
+        if guard.failed:
+            hit = None
+
+        # Only on an exact miss is an embedding worth paying for: either to
+        # find a semantically similar entry, or to index this prompt for later.
+        if hit is None:
+            async with failopen(
+                "embed", deadline, budget_ms=float(request.settings.embedding_budget_ms)
+            ) as guard:
+                embedding = await embed(normalized)
+            if guard.failed:
+                embedding = None
+
+            if embedding is not None:
+                async with (
+                    failopen("cache_lookup", deadline) as guard,
+                    session_scope(user_id=request.resolved.user_id) as session,
+                ):
+                    hit = await lookup_similar(
+                        session,
+                        request.kms,
+                        user_id=request.resolved.user_id,
+                        project_id=request.resolved.project_id,
+                        embedding=embedding,
+                        threshold=request.resolved.similarity_threshold,
+                    )
+                    if hit is not None:
+                        await record_hit(get_redis(request.settings), hit.entry_id)
+                if guard.failed:
+                    hit = None
+
+            if hit is not None:
+                await record_hit(get_redis(request.settings), hit.entry_id)
+        if guard.failed:
+            hit = None
+
+    if hit is not None:
+        # The provider is never called. This is the whole point.
+        return await _serve_from_cache(request, hit, started)
 
     # -- [4] Routing --------------------------------------------------- P5 --
     # with failopen("routing", deadline) as guard:
@@ -133,12 +226,20 @@ async def run_pipeline(request: ProxyRequest) -> PipelineResult:
     # Not earlier. The plaintext key's lifetime should be as short as we can
     # make it, so it is fetched after every step that might have returned
     # without needing it at all (CODEBASE_GUIDE §7.1).
-    api_key = await decrypt_provider_key(request.kms, request.encrypted_key)
+    api_key = await decrypt_provider_key(request.kms, await request.load_encrypted_key())
 
     # -- [6] Forward ------------------------------------------------------
+    cache_context = (
+        _CacheContext(normalized_prompt=normalized, embedding=embedding)
+        if decision.cacheable and embedding is not None
+        else None
+    )
+
     if request.stream:
-        return await _forward_streaming(request, api_key, model_used, started, deadline)
-    return await _forward_unary(request, api_key, model_used, started, deadline)
+        return await _forward_streaming(
+            request, api_key, model_used, started, deadline, cache_context
+        )
+    return await _forward_unary(request, api_key, model_used, started, deadline, cache_context)
 
 
 # ---------------------------------------------------------------------------
@@ -152,6 +253,7 @@ async def _forward_unary(
     model_used: str,
     started: float,
     deadline: Deadline,
+    cache_context: _CacheContext | None = None,
 ) -> PipelineResult:
     """Non-streamed forward."""
     provider = request.provider
@@ -210,6 +312,11 @@ async def _forward_unary(
         status=response.status_code,
     )
 
+    if cache_context is not None:
+        # After the ledger write and before returning: the response is already
+        # complete, so this costs the caller nothing but a coroutine.
+        await _write_cache_entry(request, cache_context, body, model_used, usage)
+
     _logger.info(
         "request_forwarded",
         request_id=request.request_id,
@@ -236,6 +343,7 @@ async def _forward_streaming(
     model_used: str,
     started: float,
     deadline: Deadline,
+    cache_context: _CacheContext | None = None,
 ) -> PipelineResult:
     """Streamed forward with a non-buffering tee.
 
@@ -289,6 +397,11 @@ async def _forward_streaming(
             # Runs on success, on error, and on client disconnect. A partial
             # stream still consumed provider tokens, so it still gets a row.
             latency_ms = (time.perf_counter() - started) * 1000.0
+
+            # Ledger first, always. It is the system of record; a cache entry
+            # is disposable. Writing the cache first meant an exception or a
+            # cancellation there could take the ledger row with it — which it
+            # did, silently, on every streamed request.
             await _record_stream(
                 request,
                 model_used=model_used,
@@ -299,6 +412,20 @@ async def _forward_streaming(
                 error_code=error_code,
                 optimization_ms=deadline.elapsed_ms,
             )
+
+            if cache_context is not None and capture.completed and status < 400:
+                # Only a stream that finished is worth caching — replaying a
+                # truncated answer would hand the same failure to everyone.
+                try:
+                    await _write_cache_entry(
+                        request,
+                        cache_context,
+                        _assemble_streamed_body(capture, model_used),
+                        capture.model or model_used,
+                        capture.usage or Usage(0, 0, estimated=True),
+                    )
+                except Exception:
+                    _logger.warning("cache_write_failed", subsystem="cache")
 
     return PipelineResult(
         status_code=200,
@@ -346,6 +473,9 @@ async def _record(
     itl_ms: float | None = None,
     tps: float | None = None,
     streamed: bool = False,
+    cache_hit: bool = False,
+    cache_similarity: float | None = None,
+    cost_override: str | None = None,
 ) -> None:
     """Build and enqueue the ledger event. Never raises."""
     now = datetime.now(UTC)
@@ -363,6 +493,11 @@ async def _record(
     except (PriceNotFoundError, ValueError):
         # An unpriced model must not lose us the row.
         cost_usd = "0"
+
+    if cost_override is not None:
+        # A cache hit costs nothing: the provider was never called. The saving
+        # is the whole of cost_would_have_been_usd.
+        cost_usd = cost_override
 
     would_have_been = cost_would_have_been(
         model_requested, usage.tokens_in, usage.tokens_out, at=now
@@ -389,7 +524,9 @@ async def _record(
         status=status,
         error_code=error_code,
         streamed=streamed,
-        routing_reason_code=REASON_PASSTHROUGH,
+        cache_hit=cache_hit,
+        cache_similarity=cache_similarity,
+        routing_reason_code=REASON_CACHE_HIT if cache_hit else REASON_PASSTHROUGH,
     )
 
     from apicost.db.redis import get_redis
@@ -489,3 +626,115 @@ def _error_code(body: dict[str, Any]) -> str | None:
 
 def new_pipeline_request_id() -> str:
     return new_request_id()
+
+
+async def _serve_from_cache(request: ProxyRequest, hit: CacheHit, started: float) -> PipelineResult:
+    """Return a cached response without calling the provider.
+
+    The saving recorded here is the *whole* cost the request would have
+    incurred, because the provider call did not happen (CODEBASE_GUIDE §6).
+    """
+    latency_ms = (time.perf_counter() - started) * 1000.0
+
+    # Ledgering is bookkeeping; the answer is already known. Running it
+    # concurrently rather than before the return keeps it off the measured
+    # path, where it was costing a Redis round trip against a 30 ms budget.
+    await asyncio.gather(
+        _record(
+            request,
+            model_used=hit.model_used,
+            usage=Usage(hit.tokens_in, hit.tokens_out, estimated=False),
+            latency_ms=latency_ms,
+            status=200,
+            cache_hit=True,
+            cache_similarity=hit.similarity,
+            cost_override="0",
+        ),
+        return_exceptions=True,
+    )
+
+    _logger.info(
+        "cache_hit",
+        request_id=request.request_id,
+        similarity=round(hit.similarity, 4),
+        exact=hit.exact,
+        latency_ms=round(latency_ms, 2),
+    )
+
+    headers = _metadata_headers(request, hit.model_used, cache_hit=True)
+
+    if request.stream:
+        # Re-chunked as SSE so a streaming client cannot tell the difference
+        # (BUILD_SPEC §4 P4).
+        return PipelineResult(
+            status_code=200,
+            stream=replay_as_sse(hit.body),
+            headers=headers,
+            model_used=hit.model_used,
+            cache_hit=True,
+            reason_code=REASON_CACHE_HIT,
+        )
+
+    return PipelineResult(
+        status_code=200,
+        body=hit.body,
+        headers=headers,
+        model_used=hit.model_used,
+        cache_hit=True,
+        reason_code=REASON_CACHE_HIT,
+    )
+
+
+async def _write_cache_entry(
+    request: ProxyRequest,
+    context: _CacheContext,
+    body: dict[str, Any],
+    model_used: str,
+    usage: Usage,
+) -> None:
+    """Store a response for next time. Off the critical path; never raises."""
+    try:
+        async with session_scope(user_id=request.resolved.user_id) as session:
+            await semantic_store(
+                session,
+                get_redis(request.settings),
+                request.kms,
+                user_id=request.resolved.user_id,
+                project_id=request.resolved.project_id,
+                normalized_prompt=context.normalized_prompt,
+                embedding=context.embedding,
+                body=body,
+                model_used=model_used,
+                tokens_in=usage.tokens_in,
+                tokens_out=usage.tokens_out,
+                ttl_seconds=request.resolved.cache_ttl_seconds,
+            )
+    except Exception:
+        _logger.warning("cache_write_failed", subsystem="cache")
+
+
+def _assemble_streamed_body(capture: StreamCapture, model_used: str) -> dict[str, Any]:
+    """Rebuild a complete response body from what the tee observed.
+
+    A streamed response is never held in one piece, so caching one means
+    reassembling it. The shape matches a non-streamed completion, which is what
+    `replay_as_sse` expects to re-chunk on the way back out.
+    """
+    return {
+        "id": f"chatcmpl-{new_request_id()}",
+        "object": "chat.completion",
+        "created": 0,
+        "model": capture.model or model_used,
+        "choices": [
+            {
+                "index": 0,
+                "message": {"role": "assistant", "content": capture.text},
+                "finish_reason": capture.finish_reason or "stop",
+            }
+        ],
+        "usage": {
+            "prompt_tokens": capture.usage.tokens_in if capture.usage else 0,
+            "completion_tokens": capture.usage.tokens_out if capture.usage else 0,
+            "total_tokens": capture.usage.total if capture.usage else 0,
+        },
+    }

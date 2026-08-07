@@ -132,6 +132,7 @@ async def build_proxy_request(
     authorization: str | None,
     request_id: str,
     settings: Settings,
+    headers: dict[str, str] | None = None,
 ) -> ProxyRequest:
     """Authenticate and assemble everything the pipeline needs."""
     raw_key = extract_bearer_token(authorization)
@@ -152,10 +153,11 @@ async def build_proxy_request(
         body=body,
         resolved=resolved,
         provider=build_provider(provider_name, settings),
-        encrypted_key=await _load_provider_key(resolved.user_id, provider_name, settings),
+        load_encrypted_key=lambda: _load_provider_key(resolved.user_id, provider_name, settings),
         kms=get_kms_client(settings),
         settings=settings,
         stream=bool(body.get("stream", False)),
+        headers=headers or {},
     )
 
 
@@ -197,6 +199,7 @@ async def _handle(
         authorization=authorization,
         request_id=getattr(request.state, "request_id", ""),
         settings=settings,
+        headers=dict(request.headers),
     )
 
     result = await run_pipeline(proxy_request)

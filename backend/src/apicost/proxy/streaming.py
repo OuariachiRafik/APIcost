@@ -58,6 +58,9 @@ class StreamCapture:
     finish_reason: str | None = None
     model: str | None = None
     text_length: int = 0
+    text: str = ""
+    """The assembled completion. Needed to cache a streamed response, which is
+    otherwise never held in one piece (§4 P4)."""
     completed: bool = False
     """False when the stream ended without a ``[DONE]`` — a disconnect or an
     upstream error mid-flight. Such rows are still ledgered, flagged."""
@@ -175,6 +178,7 @@ def _absorb(capture: StreamCapture, payload: dict[str, Any]) -> None:
             if isinstance(content, str) and content:
                 capture.content_chunks += 1
                 capture.text_length += len(content)
+                capture.text += content
         if choice.get("finish_reason"):
             capture.finish_reason = choice["finish_reason"]
 

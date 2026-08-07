@@ -19,6 +19,8 @@ from apicost.api.deps import CurrentUser, DbSession, require_project
 from apicost.core.ids import new_id
 from apicost.core.logging import get_logger
 from apicost.db.models import Project
+from apicost.db.redis import get_redis
+from apicost.proxy.auth import purge_project_auth_cache
 
 router = APIRouter(prefix="/projects", tags=["projects"])
 
@@ -112,6 +114,12 @@ async def update_settings(
             setattr(project, field, value)
 
     await session.flush()
+
+    # The proxy resolves project settings through the auth cache, so a changed
+    # threshold or toggle would otherwise not take effect for up to 60 s. The
+    # user just moved a slider; they expect the next request to honour it.
+    await purge_project_auth_cache(session, get_redis(), user.id, project.id)
+
     _logger.info(
         "project_settings_updated",
         user_id=user.id,

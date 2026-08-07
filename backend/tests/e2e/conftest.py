@@ -113,7 +113,8 @@ async def api_base(monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[AsyncClient
 async def clean_all() -> AsyncIterator[None]:
     """Empty every table and the ledger stream."""
     statement = text(
-        "TRUNCATE users, refresh_tokens, provider_keys, projects, proxy_keys, requests_log CASCADE"
+        "TRUNCATE users, refresh_tokens, provider_keys, projects, proxy_keys, "
+        "requests_log, cache_entries, usage_rollup_daily, token_bucket_rollup_daily CASCADE"
     )
     engine = get_engine()
     async with engine.begin() as conn:

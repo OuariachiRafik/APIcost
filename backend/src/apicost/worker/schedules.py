@@ -15,6 +15,7 @@ from typing import Any, ClassVar
 from arq import cron
 from arq.connections import RedisSettings
 
+from apicost.cache.maintenance import run_cache_maintenance
 from apicost.config import get_settings
 from apicost.core.logging import configure_logging, get_logger
 from apicost.db.redis import close_redis
@@ -35,6 +36,11 @@ async def drain_ledger_job(ctx: dict[str, Any]) -> int:
 async def rebuild_rollups_job(ctx: dict[str, Any]) -> int:
     """Keep the usage rollups fresh (ADR 0006)."""
     return await rebuild_rollups()
+
+
+async def cache_maintenance_job(ctx: dict[str, Any]) -> int:
+    """Fold buffered cache-hit counters in and sweep expired entries."""
+    return await run_cache_maintenance()
 
 
 async def ensure_partitions_job(ctx: dict[str, Any]) -> int:
@@ -66,6 +72,7 @@ class WorkerSettings:
     functions: ClassVar[list[Any]] = [
         drain_ledger_job,
         rebuild_rollups_job,
+        cache_maintenance_job,
         ensure_partitions_job,
     ]
     cron_jobs: ClassVar[list[Any]] = [
@@ -74,6 +81,7 @@ class WorkerSettings:
         # Every minute: aggregates lag by at most that, and the API reports
         # how stale they are rather than implying they are live.
         cron(rebuild_rollups_job, second={30}),
+        cron(cache_maintenance_job, minute=set(range(0, 60, 5))),
         # Daily, well ahead of the month boundary.
         cron(ensure_partitions_job, hour=3, minute=0),
     ]

@@ -20,6 +20,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
 from apicost.app import create_app
+from apicost.cache.embeddings import warm_embedder
 from apicost.core.errors import APICostError
 from apicost.core.logging import get_logger
 from apicost.proxy import ingress
@@ -27,11 +28,24 @@ from apicost.proxy.providers.base import close_http_client
 
 _logger = get_logger(__name__)
 
+
+async def _shutdown() -> None:
+    # The embedding model is deliberately *not* dropped here. It is a
+    # process-wide resource and the process is terminating, so freeing it buys
+    # nothing — while dropping it would leave a second app instance in the same
+    # process (as tests create) running without an embedder.
+    await close_http_client()
+
+
 app: FastAPI = create_app(
     service="proxy",
     title="APICost Proxy",
     description="OpenAI-compatible proxy: cache, route, log, protect.",
-    on_shutdown=close_http_client,
+    # Loading the embedding model takes seconds. Paying it at startup keeps it
+    # off the first user's request, where it would blow the deadline for
+    # everyone queued behind them (§4 P4).
+    on_startup=warm_embedder,
+    on_shutdown=_shutdown,
 )
 
 app.include_router(ingress.router)

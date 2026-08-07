@@ -83,6 +83,7 @@ def create_app(
     description: str,
     settings: Settings | None = None,
     enable_cors: bool = False,
+    on_startup: Callable[[], Awaitable[object]] | None = None,
     on_shutdown: Callable[[], Awaitable[None]] | None = None,
 ) -> FastAPI:
     """Build an ASGI app with the shared logging, error, and health wiring."""
@@ -92,6 +93,13 @@ def create_app(
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         configure_logging(level=cfg.log_level, json_output=cfg.log_json, service=service)
         _logger.info("service_starting", service=service, environment=cfg.environment)
+        if on_startup is not None:
+            try:
+                await on_startup()
+            except Exception:
+                # A failed warmup degrades a feature; it must not stop the
+                # process from serving traffic.
+                _logger.warning("startup_hook_failed", service=service, exc_info=True)
         try:
             yield
         finally:

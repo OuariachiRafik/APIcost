@@ -34,7 +34,10 @@ def admin_engine() -> AsyncEngine:
 @pytest.fixture
 async def clean_db() -> AsyncIterator[None]:
     """Empty every table, before and after."""
-    statement = text("TRUNCATE users, refresh_tokens, provider_keys, projects, proxy_keys CASCADE")
+    statement = text(
+        "TRUNCATE users, refresh_tokens, provider_keys, projects, proxy_keys, "
+        "cache_entries, usage_rollup_daily, token_bucket_rollup_daily CASCADE"
+    )
     engine = get_engine()
     async with engine.begin() as conn:
         await conn.execute(statement)

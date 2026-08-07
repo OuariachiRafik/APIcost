@@ -20,7 +20,7 @@ from __future__ import annotations
 import json
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
-from typing import Any, Final
+from typing import TYPE_CHECKING, Any, Final
 
 from redis.asyncio import Redis
 from sqlalchemy import select
@@ -31,6 +31,9 @@ from apicost.core.security import PROXY_KEY_PREFIX, hash_proxy_key
 from apicost.db.models import Project, ProxyKey
 from apicost.db.session import session_scope, set_rls_user
 
+if TYPE_CHECKING:
+    from sqlalchemy.ext.asyncio import AsyncSession
+
 __all__ = [
     "AUTH_CACHE_PREFIX",
     "AUTH_CACHE_TTL_SECONDS",
@@ -39,6 +42,7 @@ __all__ = [
     "extract_bearer_token",
     "purge_auth_cache",
     "purge_auth_cache_many",
+    "purge_project_auth_cache",
     "resolve_proxy_key",
 ]
 
@@ -209,6 +213,29 @@ async def purge_auth_cache(redis: Redis, proxy_key_hash: str) -> None:
         await redis.delete(auth_cache_key(proxy_key_hash))
     except Exception:
         _logger.warning("auth_cache_purge_failed", subsystem="auth_cache")
+
+
+async def purge_project_auth_cache(
+    session: AsyncSession, redis: Redis, user_id: str, project_id: str
+) -> None:
+    """Drop every cached resolution for a project's keys.
+
+    Called whenever project settings change. The cached ``ResolvedKey`` carries
+    the project's toggles and thresholds, so without this a user who adjusts
+    the similarity threshold sees no effect until the TTL lapses.
+    """
+    from sqlalchemy import select
+
+    from apicost.db.models import ProxyKey
+
+    result = await session.execute(
+        select(ProxyKey.proxy_key_hash).where(
+            ProxyKey.user_id == user_id,
+            ProxyKey.project_id == project_id,
+            ProxyKey.revoked_at.is_(None),
+        )
+    )
+    await purge_auth_cache_many(redis, list(result.scalars()))
 
 
 async def purge_auth_cache_many(redis: Redis, proxy_key_hashes: list[str]) -> None:
