@@ -212,6 +212,23 @@ async def drain_ledger(
                     _logger.warning("ledger_batch_write_failed", subsystem="ledger", rows=len(rows))
                     return written
 
+                # Anomaly scoring runs only after the rows are durable. If it
+                # ran first, a failed insert would still have consumed the
+                # window and advanced the baseline, so the same traffic could
+                # never be re-scored when the batch was retried.
+                #
+                # Deliberately outside the insert's try: these rows are already
+                # written, and letting a detector failure reach that handler
+                # would skip the ack and redeliver a batch Postgres has
+                # accepted. It swallows its own exceptions, and this is the
+                # belt to that pair of braces.
+                try:
+                    from apicost.anomaly.pipeline import process_ledger_batch
+
+                    await process_ledger_batch(client, rows, settings=cfg)
+                except Exception:
+                    _logger.warning("anomaly_batch_failed", subsystem="anomaly", rows=len(rows))
+
             if ack_ids:
                 try:
                     await client.xack(cfg.ledger_stream_key, CONSUMER_GROUP, *ack_ids)

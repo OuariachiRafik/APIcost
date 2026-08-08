@@ -114,6 +114,10 @@ the request still succeeds.
 | Change database roles or grants | `docker/postgres/init/01-app-role.sql` — read §7.3 first |
 | Change routing rules or the classifier | `routing/engine.py`, `routing/rules.py`, `routing/train.py` |
 | Change the ledger partition window | `worker/tasks.py:ensure_partitions` — more partitions is not free, see P5's report |
+| Change budget periods or enforcement | `budgets/enforcement.py` — Redis only, never Postgres |
+| Change anomaly thresholds | `config.py`, then `anomaly/zscore.py`, `anomaly/forest.py` |
+| Change what a baseline *is* | `stats/rolling.py` (pure); its storage is `anomaly/store.py` ([ADR 0008](adr/0008-stats-purity-vs-spec-layout.md)) |
+| Add an email or alert type | `notify/email.py`, `anomaly/alerts.py` |
 | Change where the browser keeps tokens | `web/src/lib/auth.tsx` ([ADR 0004](adr/0004-spa-token-storage.md)) |
 
 ---
@@ -220,6 +224,19 @@ Fail-open covers **optimizations**: cache, routing, stats, logging. It does not 
 - An unknown or revoked key is refused, always, however many subsystems are down.
 - `hard_stop` budgets (P6) fail *closed* — the one deliberate inversion in the system.
 
+**Budget enforcement in detail** (`budgets/enforcement.py`). It sits outside the `Deadline` and
+outside `failopen`, before the cache lookup. When Redis will not answer:
+
+| Project's budget action | Unreadable state |
+|---|---|
+| none | pass through |
+| `alert_only`, `soft_throttle` | pass through, logged `warning` |
+| `hard_stop` | **refuse (402)**, logged `error` |
+
+Refusing a paying customer's traffic must never be something an operator infers from a graph, hence
+the log level. The check runs before the cache because a project the user believes is stopped must
+not keep answering, even for free.
+
 `tests/e2e/test_fail_open.py` asserts both directions. Keep it green; it is the product's reliability
 guarantee in executable form.
 
@@ -306,6 +323,21 @@ present.
 | Latency regression | Run the harness and read `decompose_latency`'s `bottleneck` and `stage_pct` |
 | Alerts spamming | Cooldown in `anomaly/`; also check the minimum-sample guard on the z-score |
 | Streaming broken in a client SDK | `proxy/streaming.py` — you probably altered the response body schema instead of using headers |
+
+---
+
+## 11b. Two traps in the P6 code
+
+**A cache hit consumes no budget, and that breaks naive budget tests.** It was never billed, so it
+must not count — correct in production, and it means any test that reuses a prompt measures the
+cache rather than the budget. Similar prompts are enough: "throttle probe 0" and "throttle probe 1"
+are within the semantic threshold. Budget tests disable caching explicitly.
+
+**An IsolationForest measures uniqueness, not distance.** Fit it on history alone and it cannot
+split features that are constant in that history — which is exactly the set a leaked key changes, so
+the detector scores the leak as normal. Fit it on history plus the scored point and it flags *any*
+deviation from a constant feature, however small. `anomaly/forest.py` does the second and gates the
+verdict on a robust magnitude test. Both failure modes are pinned by tests; see P6's report.
 
 ---
 

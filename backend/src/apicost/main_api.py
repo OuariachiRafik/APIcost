@@ -15,6 +15,7 @@ from fastapi import FastAPI
 
 from apicost.api.routers import (
     auth,
+    budgets,
     cache,
     connection,
     keys,
@@ -38,6 +39,7 @@ app.include_router(keys.router)
 app.include_router(projects.router)
 app.include_router(proxy_keys.router)
 app.include_router(connection.router)
+app.include_router(budgets.router)
 app.include_router(cache.router)
 app.include_router(routing.router)
 app.include_router(usage.router)

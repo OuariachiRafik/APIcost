@@ -14,3 +14,4 @@ would otherwise have shipped looking correct, along with why they were invisible
 | P3 | [Visibility & reporting](p3-visibility.md) | ✅ complete |
 | P4 | [Semantic caching](p4-semantic-caching.md) | ✅ complete |
 | P5 | [Intelligent routing](p5-intelligent-routing.md) | ✅ complete |
+| P6 | [Budgets, anomaly detection, alerts](p6-budgets-anomaly-alerts.md) | ✅ complete |

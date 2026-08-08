@@ -275,3 +275,84 @@ class RoutingRule(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
+
+
+class Budget(Base):
+    """A spend limit for one project over one period — UC-29, UC-30.
+
+    ``action`` decides what crossing it does: notify, degrade, or refuse. Only
+    ``hard_stop`` refuses, and it is the one place in the system where a failure
+    to read state blocks the request rather than passing it through
+    (CLAUDE.md hard rule 1).
+    """
+
+    __tablename__ = "budgets"
+
+    id: Mapped[str] = mapped_column(Text, primary_key=True, default=_ulid)
+    user_id: Mapped[str] = mapped_column(Text, nullable=False, index=True)
+    project_id: Mapped[str] = mapped_column(
+        Text, ForeignKey("projects.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    period: Mapped[str] = mapped_column(Text, nullable=False)
+    limit_usd: Mapped[Decimal] = mapped_column(Numeric(12, 6), nullable=False)
+    action: Mapped[str] = mapped_column(Text, nullable=False, default="alert_only")
+    is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
+class AlertEvent(Base):
+    """One thing worth telling the user about — UC-31, UC-32, UC-34.
+
+    Rows are kept after resolution. "Has this happened before, and what did we
+    do about it" is most of the value of an alert history; a table that only
+    holds open alerts answers neither question.
+    """
+
+    __tablename__ = "alert_events"
+
+    id: Mapped[str] = mapped_column(Text, primary_key=True, default=_ulid)
+    user_id: Mapped[str] = mapped_column(Text, nullable=False, index=True)
+    project_id: Mapped[str] = mapped_column(
+        Text, ForeignKey("projects.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    alert_type: Mapped[str] = mapped_column(Text, nullable=False)
+    severity: Mapped[str] = mapped_column(Text, nullable=False, default="warning")
+    title: Mapped[str] = mapped_column(Text, nullable=False)
+    detail: Mapped[dict[str, object]] = mapped_column(JSONB, nullable=False, default=dict)
+    status: Mapped[str] = mapped_column(Text, nullable=False, default="open")
+    notified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    resolution: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
+class RollingStat(Base):
+    """Durable copy of a project's Welford baseline (BUILD_SPEC §6.5).
+
+    Redis holds the working copy. This exists so that flushing Redis — routine
+    — does not silently reset every project to cold start and stop anomaly
+    detection for the next 30 windows.
+    """
+
+    __tablename__ = "rolling_stats"
+
+    project_id: Mapped[str] = mapped_column(
+        Text, ForeignKey("projects.id", ondelete="CASCADE"), primary_key=True
+    )
+    metric: Mapped[str] = mapped_column(Text, primary_key=True)
+    observation_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    mean: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    m2: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    window_started_at: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    window_cost: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    window_requests: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )

@@ -107,6 +107,15 @@ class Settings(BaseSettings):
     smtp_host: str = "localhost"
     smtp_port: int = 1025
     email_from: str = "apicost@localhost"
+    resend_api_key: SecretStr = SecretStr("")
+    """Empty in development, where alerts go to mailpit over SMTP instead."""
+
+    # -- Anomaly detection and alerting (BUILD_SPEC §6.8) ------------------
+    anomaly_z_threshold: float = 3.0
+    anomaly_min_observations: int = 30
+    alert_cooldown_seconds: int = 1800
+    """30 minutes per alert type per project. A sustained incident should send
+    one email, not one per window."""
 
     # -- Web / CORS -------------------------------------------------------
     cors_origins: list[str] = Field(default_factory=lambda: ["http://localhost:5173"])

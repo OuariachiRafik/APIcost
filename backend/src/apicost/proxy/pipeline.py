@@ -43,13 +43,20 @@ from typing import Any
 
 import httpx
 
+from apicost.budgets.enforcement import (
+    BudgetDecision,
+    BudgetSpec,
+    BudgetVerdict,
+    check_budgets,
+    record_spend,
+)
 from apicost.cache.embeddings import embed
 from apicost.cache.policy import is_cacheable, normalize_prompt
 from apicost.cache.semantic import CacheHit, lookup_exact, lookup_similar, record_hit
 from apicost.cache.semantic import store as semantic_store
 from apicost.config import Settings
 from apicost.core.deadline import Deadline, failopen
-from apicost.core.errors import UpstreamError
+from apicost.core.errors import BudgetExceededError, UpstreamError
 from apicost.core.ids import new_request_id
 from apicost.core.logging import get_logger
 from apicost.db.redis import get_redis
@@ -70,6 +77,7 @@ from apicost.proxy.streaming import StreamCapture, replay_as_sse, tee_stream
 from apicost.routing.engine import (
     REASON_FAILOPEN_TIMEOUT,
     RoutingDecision,
+    cheaper_model_for,
 )
 from apicost.routing.engine import decide as routing_decide
 from apicost.routing.escalation import looks_low_confidence
@@ -83,10 +91,40 @@ _logger = get_logger(__name__)
 
 REASON_PASSTHROUGH = "PASSTHROUGH"
 REASON_CACHE_HIT = "CACHE_HIT"
+REASON_BUDGET_THROTTLED = "BUDGET_THROTTLED"
 
 ROUTING_BUDGET_MS = 20.0
 """BUILD_SPEC §4 P5: a classifier stall past this is a passthrough, not a
 slower request."""
+
+
+def _budget_message(verdict: BudgetVerdict) -> str:
+    """The 402 body a user reads at 3am. Actionable, and free of internals."""
+    if verdict.degraded:
+        return (
+            "Budget state could not be read, and this project has a hard-stop "
+            "budget. Requests are refused until it can be verified, because a "
+            "hard stop must not fail open. Retry shortly, or change the budget "
+            "action to alert_only to allow traffic through while this clears."
+        )
+    return (
+        f"This project has exceeded its {verdict.period} budget of "
+        f"${verdict.limit_usd:,.2f} (spent ${verdict.spent_usd:,.2f}). "
+        "Requests are stopped because the budget action is hard_stop. "
+        "Raise the limit, change the action, or wait for the period to reset."
+    )
+
+
+def _budgets_for(resolved: ResolvedKey) -> list[BudgetSpec]:
+    """Rehydrate the budget specs carried in the cached auth resolution."""
+    specs: list[BudgetSpec] = []
+    for raw in resolved.budgets:
+        spec = BudgetSpec.from_raw(raw)
+        if spec is not None:
+            specs.append(spec)
+        else:
+            _logger.warning("budget_malformed", subsystem="budgets")
+    return specs
 
 
 def _rules_for(resolved: ResolvedKey) -> list[RoutingRule]:
@@ -199,6 +237,39 @@ async def run_pipeline(request: ProxyRequest) -> PipelineResult:
     model_requested = request.model_requested
     model_used = model_requested
 
+    # -- [2] Budgets -------------------------------------------- UC-29, UC-30
+    #
+    # Deliberately OUTSIDE the Deadline and outside failopen. Every other step
+    # below degrades to "forward the request unchanged" on failure; this one
+    # cannot, because forwarding unchanged is exactly what a hard stop exists
+    # to prevent (CLAUDE.md hard rule 1). Redis only — never Postgres
+    # (hard rule 7).
+    #
+    # It runs before the cache lookup on purpose. A cache hit costs the user
+    # nothing, so serving one over a hard stop would be defensible — but it
+    # would also mean a project the user believes is stopped keeps answering
+    # traffic, and "stopped" has to mean stopped.
+    budget = await check_budgets(
+        get_redis(), request.resolved.project_id, _budgets_for(request.resolved)
+    )
+    timer.mark("budget", time.perf_counter())
+
+    if budget.blocked:
+        _logger.warning(
+            "budget_hard_stop",
+            request_id=request.request_id,
+            project_id=request.resolved.project_id,
+            period=budget.period,
+            reason=budget.reason,
+            degraded=budget.degraded,
+        )
+        raise BudgetExceededError(
+            _budget_message(budget),
+            period=budget.period,
+            limit_usd=round(budget.limit_usd, 6),
+            spent_usd=round(budget.spent_usd, 6),
+        )
+
     # -- [3] Semantic cache -------------------------------------------------
     #
     # Everything here is inside failopen: a cache that raises, hangs, or blows
@@ -299,6 +370,18 @@ async def run_pipeline(request: ProxyRequest) -> PipelineResult:
     elif routing is not None:
         reason_code = routing.reason_code
         model_used = routing.model
+
+    # A soft-throttled project is over its limit but chose to degrade rather
+    # than stop (UC-30). Force the cheapest equivalent model, overriding both
+    # the caller's choice and the router's — this is the one case where the
+    # user has explicitly asked us to prefer cost over their stated model.
+    # Applied after routing so it wins, and never across providers.
+    if budget.decision is BudgetDecision.THROTTLE:
+        cheapest = cheaper_model_for(model_used)
+        if cheapest is not None and cheapest != model_used:
+            model_used = cheapest
+            reason_code = REASON_BUDGET_THROTTLED
+            routing = None
 
     # -- [5] Decrypt the provider key, in memory, immediately before use ---
     #
@@ -698,6 +781,19 @@ async def _record(
         timer.mark("ledger_client", time.perf_counter())
 
     await emit_ledger_event(redis, event, request.settings)
+
+    # Increment the budget counters here rather than in the worker. The
+    # acceptance criterion is that a hard stop engages within *one request* of
+    # the threshold; a worker draining on a 5 s cron would let everything sent
+    # in those 5 s through, which at production rates is the whole overrun.
+    # This is the same Redis round trip the ledger just made, and it never
+    # raises.
+    await record_spend(
+        redis,
+        request.resolved.project_id,
+        cost_usd,
+        [str(b.get("period")) for b in request.resolved.budgets],
+    )
 
     if timer is not None:
         timer.mark("ledger_emit", time.perf_counter())

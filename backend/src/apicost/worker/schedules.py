@@ -43,6 +43,13 @@ async def cache_maintenance_job(ctx: dict[str, Any]) -> int:
     return await run_cache_maintenance()
 
 
+async def scan_usage_patterns_job(ctx: dict[str, Any]) -> int:
+    """UC-32. Every 5 minutes, per BUILD_SPEC §4 P6."""
+    from apicost.anomaly.scan import scan_usage_patterns
+
+    return await scan_usage_patterns()
+
+
 async def ensure_partitions_job(ctx: dict[str, Any]) -> int:
     """Keep ``requests_log`` partitions provisioned ahead of time."""
     return await ensure_partitions()
@@ -74,6 +81,7 @@ class WorkerSettings:
         rebuild_rollups_job,
         cache_maintenance_job,
         ensure_partitions_job,
+        scan_usage_patterns_job,
     ]
     cron_jobs: ClassVar[list[Any]] = [
         # Every 5 s: the ledger visibility target in BUILD_SPEC §4 P2.
@@ -82,6 +90,9 @@ class WorkerSettings:
         # how stale they are rather than implying they are live.
         cron(rebuild_rollups_job, second={30}),
         cron(cache_maintenance_job, minute=set(range(0, 60, 5))),
+        # UC-32 slow path. Offset from cache maintenance so a forest fit and a
+        # cache sweep are not competing for the same worker at the same second.
+        cron(scan_usage_patterns_job, minute=set(range(2, 60, 5))),
         # Daily, well ahead of the month boundary.
         cron(ensure_partitions_job, hour=3, minute=0),
     ]

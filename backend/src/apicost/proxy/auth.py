@@ -75,6 +75,16 @@ class ResolvedKey:
     data plane must not query Postgres on the hot path (CODEBASE_GUIDE §2), and
     rules change far less often than requests arrive."""
 
+    budgets: list[dict[str, Any]] = field(default_factory=list)
+    """Budget *definitions* only — period, limit, action (UC-29, UC-30). The
+    spend counters they are compared against live in Redis and are read per
+    request; these change about as often as a user edits a setting.
+
+    The 60 s cache TTL therefore bounds how stale a *limit* can be, not how
+    stale the *spend* is. Raising a limit can take a minute to apply; a hard
+    stop still engages within one request of the threshold, which is the
+    direction that matters."""
+
     def to_json(self) -> str:
         return json.dumps(asdict(self), separators=(",", ":"))
 
@@ -184,6 +194,7 @@ async def _resolve_from_database(key_hash: str) -> ResolvedKey:
         project = project_result.scalar_one_or_none()
 
         rules: list[dict[str, Any]] = []
+        budgets: list[dict[str, Any]] = []
         if project is not None:
             rule_rows = await session.execute(
                 text(
@@ -202,6 +213,22 @@ async def _resolve_from_database(key_hash: str) -> ResolvedKey:
                     "priority": row.priority,
                 }
                 for row in rule_rows
+            ]
+
+            budget_rows = await session.execute(
+                text(
+                    "SELECT period, limit_usd, action FROM budgets "
+                    "WHERE user_id = :user_id AND project_id = :project_id AND is_active"
+                ),
+                {"user_id": proxy_key.user_id, "project_id": project.id},
+            )
+            budgets = [
+                {
+                    "period": row.period,
+                    "limit_usd": float(row.limit_usd),
+                    "action": row.action,
+                }
+                for row in budget_rows
             ]
 
     if project is None:
@@ -225,6 +252,7 @@ async def _resolve_from_database(key_hash: str) -> ResolvedKey:
         escalation_enabled=project.escalation_enabled,
         store_raw_content=project.store_raw_content,
         routing_rules=rules,
+        budgets=budgets,
     )
 
 
