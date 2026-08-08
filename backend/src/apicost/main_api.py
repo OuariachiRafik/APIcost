@@ -15,11 +15,13 @@ from fastapi import FastAPI
 
 from apicost.api.routers import (
     auth,
+    cache,
     connection,
     keys,
     projects,
     proxy_keys,
     requests,
+    routing,
     usage,
 )
 from apicost.app import create_app
@@ -36,5 +38,7 @@ app.include_router(keys.router)
 app.include_router(projects.router)
 app.include_router(proxy_keys.router)
 app.include_router(connection.router)
+app.include_router(cache.router)
+app.include_router(routing.router)
 app.include_router(usage.router)
 app.include_router(requests.router)

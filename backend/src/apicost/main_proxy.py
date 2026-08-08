@@ -25,6 +25,7 @@ from apicost.core.errors import APICostError
 from apicost.core.logging import get_logger
 from apicost.proxy import ingress
 from apicost.proxy.providers.base import close_http_client
+from apicost.routing.classifier import warm_classifier
 
 _logger = get_logger(__name__)
 
@@ -37,6 +38,17 @@ async def _shutdown() -> None:
     await close_http_client()
 
 
+async def _startup() -> None:
+    """Warm both models before the process takes traffic.
+
+    Neither is required: a missing embedder disables caching and a missing
+    classifier disables routing, and both degrade to a plain passthrough rather
+    than an error.
+    """
+    await warm_embedder()
+    warm_classifier()
+
+
 app: FastAPI = create_app(
     service="proxy",
     title="APICost Proxy",
@@ -44,7 +56,7 @@ app: FastAPI = create_app(
     # Loading the embedding model takes seconds. Paying it at startup keeps it
     # off the first user's request, where it would blow the deadline for
     # everyone queued behind them (§4 P4).
-    on_startup=warm_embedder,
+    on_startup=_startup,
     on_shutdown=_shutdown,
 )
 

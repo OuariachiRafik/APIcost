@@ -13,3 +13,4 @@ would otherwise have shipped looking correct, along with why they were invisible
 | P2 | [Proxy passthrough & ledger](p2-proxy-and-ledger.md) | ✅ complete |
 | P3 | [Visibility & reporting](p3-visibility.md) | ✅ complete |
 | P4 | [Semantic caching](p4-semantic-caching.md) | ✅ complete |
+| P5 | [Intelligent routing](p5-intelligent-routing.md) | ✅ complete |

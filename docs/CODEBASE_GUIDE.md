@@ -112,6 +112,8 @@ the request still succeeds.
 | Change how provider keys are encrypted | `vault/kms.py`, `vault/provider_keys.py` |
 | Add a control-plane endpoint | `api/routers/`, wired up in `main_api.py` |
 | Change database roles or grants | `docker/postgres/init/01-app-role.sql` — read §7.3 first |
+| Change routing rules or the classifier | `routing/engine.py`, `routing/rules.py`, `routing/train.py` |
+| Change the ledger partition window | `worker/tasks.py:ensure_partitions` — more partitions is not free, see P5's report |
 | Change where the browser keeps tokens | `web/src/lib/auth.tsx` ([ADR 0004](adr/0004-spa-token-storage.md)) |
 
 ---
@@ -164,7 +166,10 @@ Break any of these and you have a serious incident, not a bug.
    decrypted key, anywhere, for any reason.
 2. Proxy keys are stored as SHA-256 hashes. Revocation must invalidate the Redis auth cache in the
    same operation as the DB write, or a revoked key keeps working for up to 60 seconds.
-3. Every user-scoped query is bounded by `user_id` **and** protected by Postgres row-level security.
+3. `TRUNCATE` bypasses row-level security; `DELETE` does not. A cleanup routine that switches
+   between them silently changes what it removes when run as the application role. Anything wiping
+   tables across users must use the admin engine.
+4. Every user-scoped query is bounded by `user_id` **and** protected by Postgres row-level security.
    The application-layer filter is the first line, RLS is the second. Both are required.
 
    Three things make RLS actually work here, and each has silently defeated it once already:
@@ -178,10 +183,11 @@ Break any of these and you have a serious incident, not a bug.
      check therefore fails on any pooled connection that has already served one scoped request.
    - **`FORCE ROW LEVEL SECURITY`, not just `ENABLE`.** The tables are owned by the role running the
      migrations, and a plain `ENABLE` exempts the owner.
-4. Raw prompt/response text is not persisted unless the project has `store_raw_content = true`. The
+
+5. Raw prompt/response text is not persisted unless the project has `store_raw_content = true`. The
    cache is the exception, and cached bodies are encrypted with the per-user data key.
-5. TLS everywhere, no plaintext fallback, including on the proxy path.
-6. Never return another user's data through any code path — there is a test for this; keep it green.
+6. TLS everywhere, no plaintext fallback, including on the proxy path.
+7. Never return another user's data through any code path — there is a test for this; keep it green.
 
 ---
 
@@ -307,6 +313,12 @@ present.
 
 - **Escalation makes some endpoints show negative routing savings.** Correct and intentional. It is
   the signal that the endpoint should be excluded from routing.
+- **Streamed requests are never escalated.** You cannot un-send a stream, so by the time a cheap
+  answer could be judged low-confidence its tokens are already with the client. Buffering the whole
+  response to enable escalation would destroy streaming, which callers chose on purpose.
+- **The proxy takes seconds to become ready.** It loads the embedding model and the routing
+  classifier before accepting traffic, so one user does not pay for it mid-request. Readiness probes
+  and rolling deploys need a grace period to match.
 - **`tokens_estimated = true` rows exist.** Some providers omit usage on streamed responses; we
   estimate and mark it rather than silently reporting a confident wrong number.
 - **The proxy returns a provider error verbatim.** By design — the user's error handling should work

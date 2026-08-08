@@ -229,7 +229,7 @@ def _shift_month(year: int, month: int, delta: int) -> tuple[int, int]:
     return index // 12, index % 12 + 1
 
 
-async def ensure_partitions(months_ahead: int = 3, months_back: int = 18) -> int:
+async def ensure_partitions(months_ahead: int = 3, months_back: int = 2) -> int:
     """Maintain ``requests_log`` partitions either side of today.
 
     Backward as well as forward, deliberately. Rows older than the newest
@@ -237,6 +237,12 @@ async def ensure_partitions(months_ahead: int = 3, months_back: int = 18) -> int
     DEFAULT, which no range predicate can prune. That turns "last 30 days" into
     a scan of all history; it was measured at 4.0 s against a 500 ms budget
     before migration 0005 fixed it.
+
+    The backward window is small on purpose. Migration 0005 originally kept 18
+    months, which is 22 partitions and 139 relations once indexes are counted —
+    enough that whole-table operations became slow (a fixture `TRUNCATE` took
+    6.7 s) and `pg_class` grew for no benefit. Anything older still works: it
+    lands in DEFAULT, and the next pass provisions a partition for it.
     """
     created = 0
     today = datetime.now(UTC).date()

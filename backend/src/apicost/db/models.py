@@ -34,6 +34,7 @@ from sqlalchemy import (
     Text,
     func,
 )
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from apicost.core.ids import new_id
@@ -251,3 +252,26 @@ class RequestLog(Base):
     status: Mapped[int] = mapped_column(Integer, nullable=False, default=200)
     error_code: Mapped[str | None] = mapped_column(Text, nullable=True)
     streamed: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+
+
+class RoutingRule(Base):
+    """A user-defined routing rule — UC-15 (override), UC-19 (exclude).
+
+    Evaluated before the classifier and absolute; see ``routing/rules.py``.
+    """
+
+    __tablename__ = "routing_rules"
+
+    id: Mapped[str] = mapped_column(Text, primary_key=True, default=_ulid)
+    user_id: Mapped[str] = mapped_column(Text, nullable=False, index=True)
+    project_id: Mapped[str] = mapped_column(
+        Text, ForeignKey("projects.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    rule_type: Mapped[str] = mapped_column(Text, nullable=False)
+    match_condition: Mapped[dict[str, object]] = mapped_column(JSONB, nullable=False, default=dict)
+    target_model: Mapped[str | None] = mapped_column(Text, nullable=True)
+    priority: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )

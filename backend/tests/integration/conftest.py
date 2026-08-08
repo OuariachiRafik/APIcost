@@ -16,7 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
 from apicost.config import get_settings
 from apicost.db.redis import close_redis, get_redis
-from apicost.db.session import dispose_engine, get_engine
+from apicost.db.session import dispose_engine, get_admin_engine
 
 pytestmark = pytest.mark.integration
 
@@ -31,22 +31,46 @@ def admin_engine() -> AsyncEngine:
     return create_async_engine(get_settings().database_admin_url)
 
 
+_CLEANUP_TABLES = (
+    # Children before parents, so foreign keys never block a delete.
+    "requests_log",
+    "cache_entries",
+    "usage_rollup_daily",
+    "token_bucket_rollup_daily",
+    "routing_rules",
+    "proxy_keys",
+    "projects",
+    "provider_keys",
+    "refresh_tokens",
+    "users",
+)
+
+
+async def _wipe() -> None:
+    """Empty every table.
+
+    DELETE rather than TRUNCATE: TRUNCATE does DDL-level work on every
+    partition and index of `requests_log` — measured at 2.9 s against 75 ms for
+    the equivalent DELETEs, and this runs twice per test.
+
+    It has to go through the **admin** engine, though, and that difference is
+    easy to miss: TRUNCATE is not subject to row-level security, but DELETE is.
+    On the application role, with no `app.user_id` set, every one of these would
+    match zero rows and silently clean nothing.
+    """
+    async with get_admin_engine().begin() as conn:
+        for table in _CLEANUP_TABLES:
+            await conn.execute(text(f"DELETE FROM {table}"))
+
+
 @pytest.fixture
 async def clean_db() -> AsyncIterator[None]:
     """Empty every table, before and after."""
-    statement = text(
-        "TRUNCATE users, refresh_tokens, provider_keys, projects, proxy_keys, "
-        "cache_entries, usage_rollup_daily, token_bucket_rollup_daily CASCADE"
-    )
-    engine = get_engine()
-    async with engine.begin() as conn:
-        await conn.execute(statement)
+    await _wipe()
     try:
         yield
     finally:
-        engine = get_engine()
-        async with engine.begin() as conn:
-            await conn.execute(statement)
+        await _wipe()
         await dispose_engine()
         await close_redis()
 

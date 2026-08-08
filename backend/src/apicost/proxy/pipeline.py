@@ -67,6 +67,13 @@ from apicost.proxy.providers.base import (
     get_http_client,
 )
 from apicost.proxy.streaming import StreamCapture, replay_as_sse, tee_stream
+from apicost.routing.engine import (
+    REASON_FAILOPEN_TIMEOUT,
+    RoutingDecision,
+)
+from apicost.routing.engine import decide as routing_decide
+from apicost.routing.escalation import looks_low_confidence
+from apicost.routing.rules import RoutingRule
 from apicost.vault.kms import KMSClient
 from apicost.vault.provider_keys import EncryptedProviderKey, decrypt_provider_key
 
@@ -76,6 +83,33 @@ _logger = get_logger(__name__)
 
 REASON_PASSTHROUGH = "PASSTHROUGH"
 REASON_CACHE_HIT = "CACHE_HIT"
+
+ROUTING_BUDGET_MS = 20.0
+"""BUILD_SPEC §4 P5: a classifier stall past this is a passthrough, not a
+slower request."""
+
+
+def _rules_for(resolved: ResolvedKey) -> list[RoutingRule]:
+    """Rehydrate the rules carried in the cached auth resolution."""
+    rules: list[RoutingRule] = []
+    for raw in resolved.routing_rules:
+        try:
+            rules.append(
+                RoutingRule(
+                    id=str(raw["id"]),
+                    rule_type=raw["rule_type"],
+                    match_condition=raw.get("match_condition") or {},
+                    target_model=raw.get("target_model"),
+                    priority=int(raw.get("priority", 0)),
+                )
+            )
+        except (KeyError, TypeError, ValueError):
+            # A malformed rule is skipped, not fatal. The user's other rules
+            # should still apply.
+            _logger.warning("routing_rule_malformed", subsystem="routing")
+    return rules
+
+
 """P5 introduces the rest of the reason-code vocabulary (UC-16)."""
 
 
@@ -117,6 +151,23 @@ class _CacheContext:
 
 
 @dataclass
+class _RoutingContext:
+    """What routing decided, carried through to the ledger and the response."""
+
+    decision: RoutingDecision | None
+    reason_code: str
+    model_requested: str
+
+    @property
+    def routed(self) -> bool:
+        return self.decision is not None and self.decision.routed
+
+    @property
+    def model_version(self) -> str | None:
+        return self.decision.model_version if self.decision else None
+
+
+@dataclass
 class PipelineResult:
     """What ingress needs to build the HTTP response."""
 
@@ -142,6 +193,8 @@ async def run_pipeline(request: ProxyRequest) -> PipelineResult:
 
     timer = StageTimer()
     timer.start(started)
+
+    reason_code = REASON_PASSTHROUGH
 
     model_requested = request.model_requested
     model_used = model_requested
@@ -223,10 +276,29 @@ async def run_pipeline(request: ProxyRequest) -> PipelineResult:
         # The provider is never called. This is the whole point.
         return await _serve_from_cache(request, hit, started, timer)
 
-    # -- [4] Routing --------------------------------------------------- P5 --
-    # with failopen("routing", deadline) as guard:
-    #     decision = await routing_engine.decide(...)
-    # model_used = decision.model if guard.ok and decision else model_requested
+    # -- [4] Routing --------------------------------------------------------
+    #
+    # Inside failopen with its own sub-budget: BUILD_SPEC §4 P5 requires that a
+    # classifier stall past 20 ms results in passthrough logged
+    # FAILOPEN_TIMEOUT, not an error and not a delayed request.
+    routing: RoutingDecision | None = None
+
+    async with failopen("routing", deadline, budget_ms=ROUTING_BUDGET_MS) as guard:
+        routing = routing_decide(
+            request.body,
+            endpoint=request.endpoint,
+            routing_enabled=request.resolved.routing_enabled,
+            rules=_rules_for(request.resolved),
+        )
+
+    if guard.failed:
+        # A router that broke or overran must cost the user nothing but the
+        # saving it failed to find.
+        routing = None
+        reason_code = REASON_FAILOPEN_TIMEOUT
+    elif routing is not None:
+        reason_code = routing.reason_code
+        model_used = routing.model
 
     # -- [5] Decrypt the provider key, in memory, immediately before use ---
     #
@@ -242,11 +314,19 @@ async def run_pipeline(request: ProxyRequest) -> PipelineResult:
         else None
     )
 
+    routing_context = _RoutingContext(
+        decision=routing,
+        reason_code=reason_code,
+        model_requested=model_requested,
+    )
+
     if request.stream:
         return await _forward_streaming(
-            request, api_key, model_used, started, deadline, cache_context
+            request, api_key, model_used, started, deadline, cache_context, routing_context
         )
-    return await _forward_unary(request, api_key, model_used, started, deadline, cache_context)
+    return await _forward_unary(
+        request, api_key, model_used, started, deadline, cache_context, routing_context
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -261,6 +341,7 @@ async def _forward_unary(
     started: float,
     deadline: Deadline,
     cache_context: _CacheContext | None = None,
+    routing_context: _RoutingContext | None = None,
 ) -> PipelineResult:
     """Non-streamed forward."""
     provider = request.provider
@@ -300,16 +381,50 @@ async def _forward_unary(
             latency_ms=latency_ms,
             status=response.status_code,
             error_code=_error_code(raw_body),
+            # A routed request that got a 429 is still a routed request. Losing
+            # this here would report it as a passthrough and quietly understate
+            # what routing was doing when things went wrong.
+            routing_context=routing_context,
         )
         return PipelineResult(
             status_code=response.status_code,
             body=raw_body,
             model_used=model_used,
-            headers=_metadata_headers(request, model_used, cache_hit=False),
+            routed=routing_context.routed if routing_context else False,
+            reason_code=routing_context.reason_code if routing_context else REASON_PASSTHROUGH,
+            headers=_metadata_headers(
+                request,
+                model_used,
+                cache_hit=False,
+                reason_code=routing_context.reason_code if routing_context else REASON_PASSTHROUGH,
+            ),
         )
 
     body = provider.denormalize_response(raw_body)
     usage = provider.parse_usage(raw_body) or _estimate_usage(request, body)
+
+    # -- [7] Escalation ------------------------------------------------ UC-17
+    #
+    # Only after a request we routed *down*. Escalating a passthrough would
+    # mean second-guessing the model the user chose, which is not our job.
+    escalated = False
+    if (
+        routing_context is not None
+        and routing_context.routed
+        and request.resolved.escalation_enabled
+        and model_used != routing_context.model_requested
+    ):
+        verdict = looks_low_confidence(body, request_body=request.body)
+        if verdict.escalate:
+            escalated = True
+            body, usage, model_used = await _escalate(
+                request,
+                api_key,
+                original_body=body,
+                original_usage=usage,
+                target_model=routing_context.model_requested,
+                reason=verdict.reason,
+            )
 
     await _record(
         request,
@@ -317,6 +432,8 @@ async def _forward_unary(
         usage=usage,
         latency_ms=latency_ms,
         status=response.status_code,
+        routing_context=routing_context,
+        escalated=escalated,
     )
 
     if cache_context is not None:
@@ -340,7 +457,14 @@ async def _forward_unary(
         status_code=response.status_code,
         body=body,
         model_used=model_used,
-        headers=_metadata_headers(request, model_used, cache_hit=False),
+        routed=routing_context.routed if routing_context else False,
+        reason_code=routing_context.reason_code if routing_context else REASON_PASSTHROUGH,
+        headers=_metadata_headers(
+            request,
+            model_used,
+            cache_hit=False,
+            reason_code=routing_context.reason_code if routing_context else REASON_PASSTHROUGH,
+        ),
     )
 
 
@@ -351,6 +475,7 @@ async def _forward_streaming(
     started: float,
     deadline: Deadline,
     cache_context: _CacheContext | None = None,
+    routing_context: _RoutingContext | None = None,
 ) -> PipelineResult:
     """Streamed forward with a non-buffering tee.
 
@@ -361,6 +486,15 @@ async def _forward_streaming(
     provider = request.provider
     payload = provider.normalize_request(request.body, model_used)
     capture = StreamCapture()
+
+    # Note what is deliberately absent here: escalation (UC-17). It applies to
+    # non-streamed requests only, and that is a limitation of streaming rather
+    # than an oversight — you cannot un-send a stream. By the time a cheap
+    # answer can be judged low-confidence, its tokens are already in the
+    # client's hands, so the only ways to escalate would be to send a second
+    # contradictory answer or to buffer the whole response before sending any
+    # of it. The second destroys streaming, which most callers chose on
+    # purpose. So a routed streaming request stays with the cheap model.
 
     async def body_stream() -> AsyncIterator[bytes]:
         client = get_http_client(request.settings)
@@ -418,6 +552,7 @@ async def _forward_streaming(
                 status=status,
                 error_code=error_code,
                 optimization_ms=deadline.elapsed_ms,
+                routing_context=routing_context,
             )
 
             if cache_context is not None and capture.completed and status < 400:
@@ -438,7 +573,14 @@ async def _forward_streaming(
         status_code=200,
         stream=body_stream(),
         model_used=model_used,
-        headers=_metadata_headers(request, model_used, cache_hit=False),
+        routed=routing_context.routed if routing_context else False,
+        reason_code=routing_context.reason_code if routing_context else REASON_PASSTHROUGH,
+        headers=_metadata_headers(
+            request,
+            model_used,
+            cache_hit=False,
+            reason_code=routing_context.reason_code if routing_context else REASON_PASSTHROUGH,
+        ),
     )
 
 
@@ -484,6 +626,8 @@ async def _record(
     cache_similarity: float | None = None,
     cost_override: str | None = None,
     timer: StageTimer | None = None,
+    routing_context: _RoutingContext | None = None,
+    escalated: bool = False,
 ) -> None:
     """Build and enqueue the ledger event. Never raises."""
     now = datetime.now(UTC)
@@ -534,7 +678,14 @@ async def _record(
         streamed=streamed,
         cache_hit=cache_hit,
         cache_similarity=cache_similarity,
-        routing_reason_code=REASON_CACHE_HIT if cache_hit else REASON_PASSTHROUGH,
+        routed=routing_context.routed if routing_context else False,
+        routing_reason_code=(
+            REASON_CACHE_HIT
+            if cache_hit
+            else (routing_context.reason_code if routing_context else REASON_PASSTHROUGH)
+        ),
+        routing_model_version=routing_context.model_version if routing_context else None,
+        escalation_triggered=escalated,
     )
 
     if timer is not None:
@@ -562,6 +713,7 @@ async def _record_stream(
     status: int,
     error_code: str | None,
     optimization_ms: float,
+    routing_context: _RoutingContext | None = None,
 ) -> None:
     """Ledger a streamed request, including its inference metrics."""
     ttft_ms: float | None = None
@@ -603,6 +755,7 @@ async def _record_stream(
         itl_ms=itl_ms,
         tps=tps,
         streamed=True,
+        routing_context=routing_context,
     )
 
     _logger.info(
@@ -620,18 +773,32 @@ async def _record_stream(
     )
 
 
-def _metadata_headers(request: ProxyRequest, model_used: str, *, cache_hit: bool) -> dict[str, str]:
+def _metadata_headers(
+    request: ProxyRequest,
+    model_used: str,
+    *,
+    cache_hit: bool,
+    reason_code: str = REASON_PASSTHROUGH,
+    elapsed_ms: float | None = None,
+) -> dict[str, str]:
     """APICost metadata, in headers only (BUILD_SPEC §0.5).
 
     Never in the body — the caller's SDK parses that, and a stray field is a
     breaking change to somebody's application.
     """
-    return {
+    headers = {
         "X-APICost-Request-Id": request.request_id,
         "X-APICost-Cache": "hit" if cache_hit else "miss",
         "X-APICost-Model-Used": model_used,
-        "X-APICost-Reason": REASON_PASSTHROUGH,
+        "X-APICost-Reason": reason_code,
     }
+    if elapsed_ms is not None:
+        # The time *we* added, measured inside the process. A user comparing us
+        # against calling the provider directly deserves that number without
+        # having to trust a marketing page, and it is the only latency figure
+        # that isolates APICost from the network on either side of it.
+        headers["X-APICost-Latency-Ms"] = f"{elapsed_ms:.2f}"
+    return headers
 
 
 def _error_code(body: dict[str, Any]) -> str | None:
@@ -689,7 +856,7 @@ async def _serve_from_cache(
         **(timer.as_log_fields() if timer is not None else {}),
     )
 
-    headers = _metadata_headers(request, hit.model_used, cache_hit=True)
+    headers = _metadata_headers(request, hit.model_used, cache_hit=True, elapsed_ms=latency_ms)
 
     if request.stream:
         # Re-chunked as SSE so a streaming client cannot tell the difference
@@ -766,3 +933,71 @@ def _assemble_streamed_body(capture: StreamCapture, model_used: str) -> dict[str
             "total_tokens": capture.usage.total if capture.usage else 0,
         },
     }
+
+
+async def _escalate(
+    request: ProxyRequest,
+    api_key: str,
+    *,
+    original_body: dict[str, Any],
+    original_usage: Usage,
+    target_model: str,
+    reason: str,
+) -> tuple[dict[str, Any], Usage, str]:
+    """Retry once on the stronger model and return that answer instead — UC-17.
+
+    Two things this deliberately does not do:
+
+    * It does not retry more than once. A second escalation would mean three
+      paid calls for one request, and by then routing has clearly cost the user
+      money rather than saved it.
+    * It does not discard the cheap call's tokens. The returned usage is the
+      **sum of both attempts**, because that is what the user was charged. The
+      savings report has to show routing losing money on endpoints where
+      escalation fires often — that is the signal telling them to exclude it
+      (CODEBASE_GUIDE §12), and hiding it would make the number a lie.
+    """
+    provider = request.provider
+    payload = provider.normalize_request(request.body, target_model)
+
+    try:
+        response = await get_http_client(request.settings).post(
+            provider.endpoint_url(request.endpoint),
+            json=payload,
+            headers={
+                **provider.auth_headers(api_key),
+                "Content-Type": "application/json",
+            },
+        )
+        if response.status_code >= 400:
+            # The stronger model failed where the cheap one merely disappointed.
+            # Return the answer we already have rather than nothing.
+            _logger.warning(
+                "escalation_failed",
+                request_id=request.request_id,
+                status=response.status_code,
+            )
+            return original_body, original_usage, target_model
+
+        raw = response.json()
+    except (httpx.HTTPError, ValueError):
+        _logger.warning("escalation_unreachable", request_id=request.request_id)
+        return original_body, original_usage, target_model
+
+    stronger_body = provider.denormalize_response(raw)
+    stronger_usage = provider.parse_usage(raw) or _estimate_usage(request, stronger_body)
+
+    combined = Usage(
+        tokens_in=original_usage.tokens_in + stronger_usage.tokens_in,
+        tokens_out=original_usage.tokens_out + stronger_usage.tokens_out,
+        estimated=original_usage.estimated or stronger_usage.estimated,
+    )
+
+    _logger.info(
+        "request_escalated",
+        request_id=request.request_id,
+        reason=reason,
+        to_model=target_model,
+        tokens_total=combined.total,
+    )
+    return stronger_body, combined, target_model

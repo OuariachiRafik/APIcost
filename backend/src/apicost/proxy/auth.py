@@ -18,12 +18,12 @@ routing, stats, logging — never to deciding who someone is.
 from __future__ import annotations
 
 import json
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Final
 
 from redis.asyncio import Redis
-from sqlalchemy import select
+from sqlalchemy import select, text
 
 from apicost.core.errors import AuthenticationError
 from apicost.core.logging import get_logger
@@ -69,6 +69,11 @@ class ResolvedKey:
     routing_enabled: bool
     escalation_enabled: bool
     store_raw_content: bool
+
+    routing_rules: list[dict[str, Any]] = field(default_factory=list)
+    """Carried in the cached resolution rather than fetched per request: the
+    data plane must not query Postgres on the hot path (CODEBASE_GUIDE §2), and
+    rules change far less often than requests arrive."""
 
     def to_json(self) -> str:
         return json.dumps(asdict(self), separators=(",", ":"))
@@ -178,6 +183,27 @@ async def _resolve_from_database(key_hash: str) -> ResolvedKey:
         )
         project = project_result.scalar_one_or_none()
 
+        rules: list[dict[str, Any]] = []
+        if project is not None:
+            rule_rows = await session.execute(
+                text(
+                    "SELECT id, rule_type, match_condition, target_model, priority "
+                    "FROM routing_rules WHERE user_id = :user_id "
+                    "AND project_id = :project_id AND is_active"
+                ),
+                {"user_id": proxy_key.user_id, "project_id": project.id},
+            )
+            rules = [
+                {
+                    "id": row.id,
+                    "rule_type": row.rule_type,
+                    "match_condition": row.match_condition or {},
+                    "target_model": row.target_model,
+                    "priority": row.priority,
+                }
+                for row in rule_rows
+            ]
+
     if project is None:
         raise AuthenticationError("This key's project no longer exists")
 
@@ -198,6 +224,7 @@ async def _resolve_from_database(key_hash: str) -> ResolvedKey:
         routing_enabled=project.routing_enabled,
         escalation_enabled=project.escalation_enabled,
         store_raw_content=project.store_raw_content,
+        routing_rules=rules,
     )
 
 

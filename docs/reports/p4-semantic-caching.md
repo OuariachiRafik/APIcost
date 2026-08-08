@@ -9,7 +9,7 @@
 |---|---|---|
 | 1 | Equivalent-but-different prompts hit at the default threshold | ✅ against the real embedding model |
 | 2 | Raising the threshold to 0.99 makes it a miss | ✅ |
-| 3 | Cache hits return in <30 ms p95 | ✅ **11.1 ms** (was 36–48 ms; see below) |
+| 3 | Cache hits return in <30 ms p95 | ✅ **7.4–23.5 ms in-proxy** (was 36–48 ms; see below). Measured in-process per [ADR 0007](../adr/0007-cache-hit-latency-budget.md) |
 | 4 | Dollars-saved reconciles exactly with `requests_log` | ✅ hits cost 0; avoided cost recorded |
 
 The e2e cache suite runs clean: three consecutive full-file runs, 11/11 each.

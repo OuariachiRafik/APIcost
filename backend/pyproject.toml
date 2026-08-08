@@ -77,6 +77,8 @@ select = [
 
 [tool.ruff.lint.per-file-ignores]
 "tests/**" = ["S101"]
+# Labelled training data, not code. Wrapping the prompts would change them.
+"src/apicost/routing/seed_dataset.py" = ["E501"]
 
 # ---------------------------------------------------------------------------
 # Types
