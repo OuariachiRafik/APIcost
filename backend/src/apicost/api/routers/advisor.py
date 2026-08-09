@@ -12,12 +12,15 @@ from fastapi import APIRouter
 from pydantic import BaseModel, Field
 from sqlalchemy import text
 
+from apicost.advisor.breakeven import GpuOption, break_even_analysis
+from apicost.advisor.nightly import DEFAULT_GPU, GPU_OPTIONS
 from apicost.advisor.prompts import (
     analyse_context,
     suggest_compression,
 )
 from apicost.api.deps import CurrentUser, DbSession, require_project
 from apicost.api.routers.usage import TimeRange, resolve_window
+from apicost.core.errors import NotFoundError
 from apicost.core.logging import get_logger
 
 router = APIRouter(tags=["advisor"])
@@ -256,3 +259,191 @@ async def token_heavy_endpoints(
         )
         for row in rows
     ]
+
+
+# -- UC-35, UC-37: recommendations ------------------------------------------
+
+
+class RecommendationResponse(BaseModel):
+    id: str
+    kind: str
+    title: str
+    detail: dict[str, Any]
+    projected_savings_usd: float
+    confidence: str
+    sample_size: int
+    status: str
+    generated_at: Any
+
+
+class DismissRequest(BaseModel):
+    status: str = Field(default="dismissed", pattern="^(adopted|dismissed)$")
+
+
+@router.get("/advisor/recommendations")
+async def list_recommendations(
+    user: CurrentUser,
+    session: DbSession,
+    project_id: str,
+    include_dismissed: bool = False,
+) -> list[RecommendationResponse]:
+    """Recommendations for a project, largest projected saving first — UC-35, UC-37."""
+    await require_project(project_id, user, session)
+
+    sql = (
+        "SELECT id, kind, title, detail, projected_savings_usd, confidence, "
+        "sample_size, status, generated_at FROM advisor_recommendations "
+        "WHERE user_id = :user_id AND project_id = :project_id"
+    )
+    if not include_dismissed:
+        sql += " AND status <> 'dismissed'"
+    sql += " ORDER BY projected_savings_usd DESC"
+
+    rows = (
+        await session.execute(text(sql), {"user_id": user.id, "project_id": project_id})
+    ).mappings()
+
+    return [
+        RecommendationResponse(
+            id=row["id"],
+            kind=row["kind"],
+            title=row["title"],
+            detail=row["detail"],
+            projected_savings_usd=float(row["projected_savings_usd"]),
+            confidence=row["confidence"],
+            sample_size=row["sample_size"],
+            status=row["status"],
+            generated_at=row["generated_at"],
+        )
+        for row in rows
+    ]
+
+
+@router.post("/advisor/recommendations/{recommendation_id}/status")
+async def set_recommendation_status(
+    recommendation_id: str,
+    payload: DismissRequest,
+    user: CurrentUser,
+    session: DbSession,
+) -> RecommendationResponse:
+    """Adopt or dismiss. A dismissed recommendation is never re-suggested."""
+    row = (
+        (
+            await session.execute(
+                text(
+                    "UPDATE advisor_recommendations SET status = :status, "
+                    "dismissed_at = CASE WHEN :status = 'dismissed' THEN now() ELSE NULL END "
+                    "WHERE id = :id AND user_id = :user_id "
+                    "RETURNING id, kind, title, detail, projected_savings_usd, confidence, "
+                    "sample_size, status, generated_at"
+                ),
+                {"id": recommendation_id, "user_id": user.id, "status": payload.status},
+            )
+        )
+        .mappings()
+        .first()
+    )
+
+    if row is None:
+        raise NotFoundError("No such recommendation")
+
+    await session.flush()
+    return RecommendationResponse(
+        id=row["id"],
+        kind=row["kind"],
+        title=row["title"],
+        detail=row["detail"],
+        projected_savings_usd=float(row["projected_savings_usd"]),
+        confidence=row["confidence"],
+        sample_size=row["sample_size"],
+        status=row["status"],
+        generated_at=row["generated_at"],
+    )
+
+
+# -- UC-36: break-even ------------------------------------------------------
+
+
+class BreakEvenResponse(BaseModel):
+    recommendation: str
+    monthly_tokens: int
+    api_monthly_cost_usd: float
+    gpu_monthly_cost_usd: float
+    n_gpus: int
+    gpu_option: str
+    break_even_tokens: int | None
+    capacity_tokens_per_gpu: float
+    monthly_saving_usd: float
+    caveats: list[str]
+    options: list[dict[str, Any]]
+    """Every instance type scored, so the dashboard can show the comparison
+    rather than a single verdict the user has to trust."""
+
+
+@router.get("/advisor/breakeven")
+async def breakeven(
+    user: CurrentUser,
+    session: DbSession,
+    project_id: str,
+    gpu: str | None = None,
+    utilization: float = 0.5,
+) -> BreakEvenResponse:
+    """Self-hosting vs pay-per-token at this project's real volume — UC-36.
+
+    The caveats travel in the payload rather than living in the UI. A bare
+    "self-hosting is cheaper" is a misleading recommendation (BUILD_SPEC §6.7),
+    and a caveat the frontend can forget to render is a caveat that will be
+    forgotten.
+    """
+    await require_project(project_id, user, session)
+    start, end, _ = resolve_window("30d", None, None)
+
+    row = (
+        await session.execute(
+            text(
+                "SELECT COALESCE(sum(tokens_in + tokens_out), 0) AS tokens, "
+                "COALESCE(sum(cost_usd), 0) AS cost FROM requests_log "
+                "WHERE user_id = :user_id AND project_id = :project_id "
+                "AND timestamp >= :start AND timestamp < :end AND NOT cache_hit"
+            ),
+            {"user_id": user.id, "project_id": project_id, "start": start, "end": end},
+        )
+    ).one()
+
+    tokens = int(row.tokens)
+    cost = float(row.cost)
+    per_token = cost / tokens if tokens > 0 else 0.0
+
+    chosen = next((o for o in GPU_OPTIONS if o.name == gpu), DEFAULT_GPU)
+    result = break_even_analysis(tokens, per_token, chosen, utilization=utilization)
+
+    options = [_option_summary(tokens, per_token, option, utilization) for option in GPU_OPTIONS]
+
+    return BreakEvenResponse(
+        recommendation=result.recommendation,
+        monthly_tokens=result.monthly_tokens,
+        api_monthly_cost_usd=result.api_monthly_cost_usd,
+        gpu_monthly_cost_usd=result.gpu_monthly_cost_usd,
+        n_gpus=result.n_gpus,
+        gpu_option=result.gpu_option,
+        break_even_tokens=result.break_even_tokens,
+        capacity_tokens_per_gpu=round(result.capacity_tokens_per_gpu, 1),
+        monthly_saving_usd=result.monthly_saving_usd,
+        caveats=result.caveats,
+        options=options,
+    )
+
+
+def _option_summary(
+    tokens: int, per_token: float, option: GpuOption, utilization: float
+) -> dict[str, Any]:
+    scored = break_even_analysis(tokens, per_token, option, utilization=utilization)
+    return {
+        "name": option.name,
+        "cost_per_hour_usd": option.cost_per_hour_usd,
+        "n_gpus": scored.n_gpus,
+        "gpu_monthly_cost_usd": scored.gpu_monthly_cost_usd,
+        "monthly_saving_usd": scored.monthly_saving_usd,
+        "recommendation": scored.recommendation,
+        "break_even_tokens": scored.break_even_tokens,
+    }

@@ -118,6 +118,9 @@ the request still succeeds.
 | Change anomaly thresholds | `config.py`, then `anomaly/zscore.py`, `anomaly/forest.py` |
 | Change what a baseline *is* | `stats/rolling.py` (pure); its storage is `anomaly/store.py` ([ADR 0008](adr/0008-stats-purity-vs-spec-layout.md)) |
 | Add an email or alert type | `notify/email.py`, `anomaly/alerts.py` |
+| Change long-context detection | `advisor/prompts.py` (pure); it runs on the proxy inside a 5 ms budget |
+| Change GPU prices or throughput | `advisor/nightly.py:GPU_OPTIONS` — hardcoded and will go stale, see P8's report |
+| Change what earns a recommendation | `advisor/downgrade.py`, `advisor/breakeven.py` (both pure) |
 | Change where the browser keeps tokens | `web/src/lib/auth.tsx` ([ADR 0004](adr/0004-spa-token-storage.md)) |
 
 ---

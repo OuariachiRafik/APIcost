@@ -360,3 +360,34 @@ class RollingStat(Base):
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
+
+
+class AdvisorRecommendation(Base):
+    """One piece of advice, with its projected impact — UC-35, UC-36, UC-37.
+
+    Regenerated nightly rather than accumulated: a recommendation is a
+    statement about *current* usage, and yesterday's advice about traffic that
+    has since changed is worse than no advice. Dismissed rows are kept so the
+    job does not re-suggest something the user has already rejected.
+    """
+
+    __tablename__ = "advisor_recommendations"
+
+    id: Mapped[str] = mapped_column(Text, primary_key=True, default=_ulid)
+    user_id: Mapped[str] = mapped_column(Text, nullable=False, index=True)
+    project_id: Mapped[str] = mapped_column(
+        Text, ForeignKey("projects.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    kind: Mapped[str] = mapped_column(Text, nullable=False)
+    title: Mapped[str] = mapped_column(Text, nullable=False)
+    detail: Mapped[dict[str, object]] = mapped_column(JSONB, nullable=False, default=dict)
+    projected_savings_usd: Mapped[Decimal] = mapped_column(
+        Numeric(14, 6), nullable=False, default=Decimal("0")
+    )
+    confidence: Mapped[str] = mapped_column(Text, nullable=False, default="low")
+    sample_size: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    status: Mapped[str] = mapped_column(Text, nullable=False, default="open")
+    generated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    dismissed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

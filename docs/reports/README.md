@@ -15,3 +15,5 @@ would otherwise have shipped looking correct, along with why they were invisible
 | P4 | [Semantic caching](p4-semantic-caching.md) | ✅ complete |
 | P5 | [Intelligent routing](p5-intelligent-routing.md) | ✅ complete |
 | P6 | [Budgets, anomaly detection, alerts](p6-budgets-anomaly-alerts.md) | ✅ complete |
+| P7 | [Prompt & context optimization](p7-prompt-optimization.md) | ✅ complete |
+| P8 | [Decision support & advisory](p8-decision-support.md) | ✅ complete |
