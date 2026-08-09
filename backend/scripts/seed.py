@@ -90,7 +90,11 @@ def _build_row(user_id: str, project_id: str, when: datetime) -> dict[str, objec
 
     cache_hit = random.random() < 0.22
     routed = (not cache_hit) and random.random() < 0.18
-    escalated = routed and random.random() < 0.07
+    # 1.5%, not the 7% this used to be. Above ~2% the advisor correctly
+    # refuses to recommend a downgrade (advisor/downgrade.py), so the old rate
+    # described a project where the cheap tier was frequently failing — a real
+    # scenario, but a strange one to ship as the demo of a router working.
+    escalated = routed and random.random() < 0.015
     status = 200 if random.random() > 0.015 else random.choice([429, 500, 400])
 
     model_requested = model
@@ -252,6 +256,231 @@ async def seed_ledger(user_id: str, project_id: str, rows: int, days: int) -> No
     print(f"  seeded {rows:,} rows over {days} days" + " " * 20)
 
 
+async def _seed_cache_entries(user_id: str, project_id: str, count: int = 40) -> int:
+    """Populate the semantic cache through the real store path.
+
+    Goes through `cache.semantic.store` rather than inserting rows, because the
+    response payload is envelope-encrypted — fabricating the ciphertext, the
+    wrapped key and the nonce by hand would seed rows that decrypt to nothing
+    and would not exercise the code that has to read them.
+
+    Embeddings are random unit vectors rather than real ones. Loading fastembed
+    to seed a demo costs seconds per run and buys nothing: no seeded entry is
+    ever looked up by similarity, only counted and listed.
+
+    Without this, the cache screen shows a 22% hit rate against zero stored
+    entries, which is not a state the product can actually be in.
+    """
+    import math
+
+    from apicost.cache.semantic import store as cache_store
+    from apicost.config import get_settings
+    from apicost.db.redis import close_redis, get_redis
+    from apicost.db.session import session_scope
+    from apicost.vault.kms import KMSError, get_kms_client
+
+    settings = get_settings()
+    try:
+        kms = get_kms_client(settings)
+    except KMSError:
+        # No master key in the environment. That is the normal state on the
+        # host: the key is a compose-level default and there is no repo-root
+        # .env, so `make seed` outside the container cannot encrypt anything.
+        # Skipping is right — refusing to seed the other five tables because
+        # one of them needs a key would be worse than an empty cache screen.
+        print(
+            "  cache_entries    skipped - APICOST_KMS_MASTER_KEY is not set.\n"
+            "                   Run inside the container, or export the key from"
+            " .env.example."
+        )
+        return 0
+
+    redis = get_redis(settings)
+
+    prompts = [
+        "summarise this support ticket",
+        "classify the sentiment of this review",
+        "extract the invoice total",
+        "write a commit message for this diff",
+        "translate this paragraph to french",
+    ]
+
+    stored = 0
+    try:
+        async with session_scope(user_id) as session:
+            for index in range(count):
+                raw = [random.gauss(0, 1) for _ in range(384)]
+                norm = math.sqrt(sum(v * v for v in raw)) or 1.0
+                embedding = [v / norm for v in raw]
+
+                entry_id = await cache_store(
+                    session,
+                    redis,
+                    kms,
+                    user_id=user_id,
+                    project_id=project_id,
+                    normalized_prompt=f"{prompts[index % len(prompts)]} #{index}",
+                    embedding=embedding,
+                    body={
+                        "id": f"chatcmpl-seed-{index}",
+                        "object": "chat.completion",
+                        "model": "gpt-4o-mini",
+                        "choices": [
+                            {
+                                "index": 0,
+                                "message": {"role": "assistant", "content": "Seeded response."},
+                                "finish_reason": "stop",
+                            }
+                        ],
+                    },
+                    model_used="gpt-4o-mini",
+                    tokens_in=random.randint(40, 400),
+                    tokens_out=random.randint(20, 200),
+                    ttl_seconds=86_400,
+                )
+                if entry_id is not None:
+                    stored += 1
+    finally:
+        await close_redis()
+
+    return stored
+
+
+async def seed_feature_data(user_id: str, project_id: str) -> dict[str, int]:
+    """Populate the tables the P4-P8 screens read.
+
+    Without this the dashboard renders five empty screens and there is no way
+    to tell a broken query from a project that has simply never had a budget.
+    Everything here is idempotent: `make seed` is run repeatedly, and a seeder
+    that duplicates its own rows makes the counts on those screens nonsense.
+    """
+    engine = get_admin_engine()
+    now = datetime.now(UTC)
+    counts: dict[str, int] = {}
+
+    async with engine.begin() as conn:
+        # -- Budgets (UC-29/30) — one per period, the unique constraint's shape.
+        await conn.execute(text("DELETE FROM budgets WHERE project_id = :p"), {"p": project_id})
+        budgets = [
+            ("daily", "25.000000", "alert_only"),
+            ("monthly", "400.000000", "soft_throttle"),
+        ]
+        for period, limit, action in budgets:
+            await conn.execute(
+                text(
+                    "INSERT INTO budgets (id, user_id, project_id, period, limit_usd, action) "
+                    "VALUES (:id, :u, :p, :period, :limit, :action)"
+                ),
+                {
+                    "id": new_id(),
+                    "u": user_id,
+                    "p": project_id,
+                    "period": period,
+                    "limit": limit,
+                    "action": action,
+                },
+            )
+        counts["budgets"] = len(budgets)
+
+        # -- Routing rules (UC-15/19)
+        await conn.execute(
+            text("DELETE FROM routing_rules WHERE project_id = :p"), {"p": project_id}
+        )
+        rules = [
+            ("exclude", '{"endpoint": "/v1/embeddings"}', None, 100),
+            ("override", '{"endpoint": "/v1/chat/completions"}', "gpt-4o-mini", 10),
+        ]
+        for rule_type, match, target, priority in rules:
+            await conn.execute(
+                text(
+                    "INSERT INTO routing_rules (id, user_id, project_id, rule_type, "
+                    "match_condition, target_model, priority) VALUES (:id, :u, :p, :t, "
+                    "CAST(:m AS jsonb), :target, :priority)"
+                ),
+                {
+                    "id": new_id(),
+                    "u": user_id,
+                    "p": project_id,
+                    "t": rule_type,
+                    "m": match,
+                    "target": target,
+                    "priority": priority,
+                },
+            )
+        counts["routing_rules"] = len(rules)
+
+        # -- Alert history (UC-31/32/34), including a resolved one so the
+        #    dashboard has both states to render.
+        await conn.execute(
+            text("DELETE FROM alert_events WHERE project_id = :p"), {"p": project_id}
+        )
+        alerts = [
+            (
+                "spend_spike",
+                "critical",
+                "Spend spike on production",
+                '{"window_spend_usd": "$4.1200", "normal_spend_usd": "$0.1200", '
+                '"times_normal": "34.3x", "requests_in_window": 512}',
+                "open",
+                None,
+                2,
+            ),
+            (
+                "usage_pattern",
+                "critical",
+                "Unusual usage pattern on production",
+                '{"what_changed": "model_entropy, unique_prompt_ratio", '
+                '"requests_per_minute": "11.4"}',
+                "resolved",
+                "Checked the logs - it was our own load test.",
+                9,
+            ),
+            (
+                "budget_threshold",
+                "warning",
+                "production is at 80% of its monthly budget",
+                '{"period": "monthly", "limit_usd": 400.0, "spent_usd": 321.4}',
+                "acknowledged",
+                None,
+                4,
+            ),
+        ]
+        for kind, severity, title, detail, status, resolution, days_ago in alerts:
+            await conn.execute(
+                text(
+                    "INSERT INTO alert_events (id, user_id, project_id, alert_type, severity, "
+                    "title, detail, status, resolution, resolved_at, created_at) "
+                    "VALUES (:id, :u, :p, :kind, :sev, :title, CAST(:detail AS jsonb), "
+                    ":status, :resolution, :resolved_at, :created_at)"
+                ),
+                {
+                    "id": new_id(),
+                    "u": user_id,
+                    "p": project_id,
+                    "kind": kind,
+                    "sev": severity,
+                    "title": title,
+                    "detail": detail,
+                    "status": status,
+                    "resolution": resolution,
+                    "resolved_at": now if status == "resolved" else None,
+                    "created_at": now - timedelta(days=days_ago),
+                },
+            )
+        counts["alert_events"] = len(alerts)
+
+    counts["cache_entries"] = await _seed_cache_entries(user_id, project_id)
+
+    # -- Recommendations (UC-35/36/37) come from the real nightly job rather
+    #    than being invented here. Seeded advice that no code produced is how a
+    #    screen ends up rendering a shape the generator never emits.
+    from apicost.advisor.nightly import generate_recommendations
+
+    counts["recommendations"] = await generate_recommendations()
+
+    return counts
+
+
 async def main() -> int:
     parser = argparse.ArgumentParser(description="Seed a demo account and ledger history")
     parser.add_argument("--rows", type=int, default=50_000)
@@ -279,6 +508,10 @@ async def main() -> int:
             print("rollups:")
             rows = await rebuild_rollups(full=True)
             print(f"  built {rows:,} rollup rows")
+
+        print("features:")
+        for table, count in (await seed_feature_data(user_id, project_id)).items():
+            print(f"  {table:<16} {count:,}")
     finally:
         await dispose_engine()
 
