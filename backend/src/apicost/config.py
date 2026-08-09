@@ -107,6 +107,12 @@ class Settings(BaseSettings):
     smtp_host: str = "localhost"
     smtp_port: int = 1025
     email_from: str = "apicost@localhost"
+    public_base_url: str = "http://localhost:8001"
+    """Origin used to build links in outbound email — unsubscribe, mainly.
+
+    Must be the API's public origin, not the SPA's: the unsubscribe link has to
+    work with one click from a mail client, without a logged-in session and
+    without JavaScript."""
     resend_api_key: SecretStr = SecretStr("")
     """Empty in development, where alerts go to mailpit over SMTP instead."""
 

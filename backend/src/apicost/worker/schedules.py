@@ -57,6 +57,15 @@ async def advisor_recommendations_job(ctx: dict[str, Any]) -> int:
     return await generate_recommendations()
 
 
+async def weekly_digest_job(ctx: dict[str, Any]) -> int:
+    """UC-38. Hourly, because "per user timezone" means asking every hour who
+    is due in their own local time rather than running once at a fixed UTC hour.
+    """
+    from apicost.notify.digest import send_weekly_digests
+
+    return await send_weekly_digests()
+
+
 async def ensure_partitions_job(ctx: dict[str, Any]) -> int:
     """Keep ``requests_log`` partitions provisioned ahead of time."""
     return await ensure_partitions()
@@ -90,6 +99,7 @@ class WorkerSettings:
         ensure_partitions_job,
         scan_usage_patterns_job,
         advisor_recommendations_job,
+        weekly_digest_job,
     ]
     cron_jobs: ClassVar[list[Any]] = [
         # Every 5 s: the ledger visibility target in BUILD_SPEC §4 P2.
@@ -106,6 +116,8 @@ class WorkerSettings:
         # After partition maintenance, so a fresh month's partition exists before
         # the advisor reads across the boundary.
         cron(advisor_recommendations_job, hour=3, minute=20),
+        # Every hour on the half hour; the job itself decides who is due.
+        cron(weekly_digest_job, minute={30}),
     ]
     on_startup = startup
     on_shutdown = shutdown

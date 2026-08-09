@@ -981,6 +981,69 @@
         "title": "LoginRequest",
         "type": "object"
       },
+      "PeerBenchmarkResponse": {
+        "properties": {
+          "available": {
+            "title": "Available",
+            "type": "boolean"
+          },
+          "cohort_p25": {
+            "title": "Cohort P25",
+            "type": "number"
+          },
+          "cohort_p50": {
+            "title": "Cohort P50",
+            "type": "number"
+          },
+          "cohort_p75": {
+            "title": "Cohort P75",
+            "type": "number"
+          },
+          "cohort_size": {
+            "title": "Cohort Size",
+            "type": "integer"
+          },
+          "minimum_cohort_size": {
+            "title": "Minimum Cohort Size",
+            "type": "integer"
+          },
+          "percentile_band": {
+            "title": "Percentile Band",
+            "type": "string"
+          },
+          "reason": {
+            "title": "Reason",
+            "type": "string"
+          },
+          "verdict": {
+            "title": "Verdict",
+            "type": "string"
+          },
+          "your_cost_per_request": {
+            "title": "Your Cost Per Request",
+            "type": "number"
+          },
+          "your_requests": {
+            "title": "Your Requests",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "available",
+          "reason",
+          "your_cost_per_request",
+          "your_requests",
+          "cohort_size",
+          "cohort_p25",
+          "cohort_p50",
+          "cohort_p75",
+          "percentile_band",
+          "verdict",
+          "minimum_cohort_size"
+        ],
+        "title": "PeerBenchmarkResponse",
+        "type": "object"
+      },
       "ProjectResponse": {
         "properties": {
           "archived_at": {
@@ -2885,6 +2948,32 @@
         ]
       }
     },
+    "/benchmark/peer": {
+      "get": {
+        "operationId": "peer_benchmark_benchmark_peer_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PeerBenchmarkResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Peer Benchmark",
+        "tags": [
+          "benchmark"
+        ]
+      }
+    },
     "/budgets": {
       "get": {
         "operationId": "list_budgets_budgets_get",
@@ -4212,6 +4301,49 @@
         "summary": "Routing Stats",
         "tags": [
           "routing"
+        ]
+      }
+    },
+    "/unsubscribe/{token}": {
+      "get": {
+        "description": "One click, no session, no JavaScript \u2014 UC-38.\n\nUnauthenticated by necessity: the link is opened from a mail client months\nafter the fact, and an unsubscribe that requires logging in is one people\nreport as spam instead. The token is a 256-bit CSPRNG value and is the only\nthing it can act on.",
+        "operationId": "unsubscribe_unsubscribe__token__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "token",
+            "required": true,
+            "schema": {
+              "title": "Token",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Unsubscribe",
+        "tags": [
+          "benchmark"
         ]
       }
     },

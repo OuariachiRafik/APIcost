@@ -276,6 +276,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/benchmark/peer": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Peer Benchmark */
+        get: operations["peer_benchmark_benchmark_peer_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/budgets": {
         parameters: {
             query?: never;
@@ -694,6 +711,31 @@ export interface paths {
          * @description Routing savings, reported separately from caching — UC-18.
          */
         get: operations["routing_stats_routing_stats_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/unsubscribe/{token}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Unsubscribe
+         * @description One click, no session, no JavaScript — UC-38.
+         *
+         *     Unauthenticated by necessity: the link is opened from a mail client months
+         *     after the fact, and an unsubscribe that requires logging in is one people
+         *     report as spam instead. The token is a 256-bit CSPRNG value and is the only
+         *     thing it can act on.
+         */
+        get: operations["unsubscribe_unsubscribe__token__get"];
         put?: never;
         post?: never;
         delete?: never;
@@ -1183,6 +1225,31 @@ export interface components {
             email: string;
             /** Password */
             password: string;
+        };
+        /** PeerBenchmarkResponse */
+        PeerBenchmarkResponse: {
+            /** Available */
+            available: boolean;
+            /** Cohort P25 */
+            cohort_p25: number;
+            /** Cohort P50 */
+            cohort_p50: number;
+            /** Cohort P75 */
+            cohort_p75: number;
+            /** Cohort Size */
+            cohort_size: number;
+            /** Minimum Cohort Size */
+            minimum_cohort_size: number;
+            /** Percentile Band */
+            percentile_band: string;
+            /** Reason */
+            reason: string;
+            /** Verdict */
+            verdict: string;
+            /** Your Cost Per Request */
+            your_cost_per_request: number;
+            /** Your Requests */
+            your_requests: number;
         };
         /** ProjectResponse */
         ProjectResponse: {
@@ -2045,6 +2112,26 @@ export interface operations {
             };
         };
     };
+    peer_benchmark_benchmark_peer_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PeerBenchmarkResponse"];
+                };
+            };
+        };
+    };
     list_budgets_budgets_get: {
         parameters: {
             query?: {
@@ -2822,6 +2909,37 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["RoutingStatsResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    unsubscribe_unsubscribe__token__get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                token: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "text/html": string;
                 };
             };
             /** @description Validation Error */

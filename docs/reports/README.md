@@ -17,3 +17,4 @@ would otherwise have shipped looking correct, along with why they were invisible
 | P6 | [Budgets, anomaly detection, alerts](p6-budgets-anomaly-alerts.md) | ✅ complete |
 | P7 | [Prompt & context optimization](p7-prompt-optimization.md) | ✅ complete |
 | P8 | [Decision support & advisory](p8-decision-support.md) | ✅ complete |
+| P9 | [Engagement & retention](p9-engagement.md) | ✅ complete |

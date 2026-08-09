@@ -17,6 +17,7 @@ budget, stats, alert, advisor, and billing tables arrive with their phases.
 
 from __future__ import annotations
 
+import secrets
 from datetime import datetime
 from decimal import Decimal
 from typing import TYPE_CHECKING
@@ -33,6 +34,7 @@ from sqlalchemy import (
     String,
     Text,
     func,
+    text,
 )
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -48,6 +50,11 @@ def _ulid() -> str:
     return new_id()
 
 
+def _token() -> str:
+    """A URL-safe unsubscribe token. CSPRNG, never derived from the user id."""
+    return secrets.token_hex(32)
+
+
 class User(Base):
     __tablename__ = "users"
 
@@ -61,6 +68,25 @@ class User(Base):
     auth_provider_id: Mapped[str | None] = mapped_column(Text, nullable=True)
     plan_id: Mapped[str] = mapped_column(Text, nullable=False, default="free")
     timezone: Mapped[str] = mapped_column(Text, nullable=False, default="UTC")
+
+    digest_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    digest_unsubscribe_token: Mapped[str] = mapped_column(
+        Text,
+        nullable=False,
+        default=_token,
+        server_default=text(
+            "replace(gen_random_uuid()::text, '-', '') || replace(gen_random_uuid()::text, '-', '')"
+        ),
+    )
+    """Stable and per user. A link in an email sent months ago must still work;
+    an unsubscribe that expires is not an unsubscribe.
+
+    Defaulted on the server as well as here, so a raw INSERT cannot create a
+    user who can never unsubscribe."""
+
+    last_digest_sent_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
