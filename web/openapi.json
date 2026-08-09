@@ -446,6 +446,33 @@
         "title": "CacheStatsResponse",
         "type": "object"
       },
+      "CheckoutRequest": {
+        "properties": {
+          "plan_id": {
+            "minLength": 1,
+            "title": "Plan Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "plan_id"
+        ],
+        "title": "CheckoutRequest",
+        "type": "object"
+      },
+      "CheckoutResponse": {
+        "properties": {
+          "checkout_url": {
+            "title": "Checkout Url",
+            "type": "string"
+          }
+        },
+        "required": [
+          "checkout_url"
+        ],
+        "title": "CheckoutResponse",
+        "type": "object"
+      },
       "CompressRequest": {
         "properties": {
           "body": {
@@ -1042,6 +1069,108 @@
           "minimum_cohort_size"
         ],
         "title": "PeerBenchmarkResponse",
+        "type": "object"
+      },
+      "PlanOption": {
+        "properties": {
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "monthly_request_limit": {
+            "title": "Monthly Request Limit",
+            "type": "integer"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "price_usd": {
+            "title": "Price Usd",
+            "type": "number"
+          },
+          "purchasable": {
+            "title": "Purchasable",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "monthly_request_limit",
+          "price_usd",
+          "purchasable"
+        ],
+        "title": "PlanOption",
+        "type": "object"
+      },
+      "PlanResponse": {
+        "properties": {
+          "action": {
+            "title": "Action",
+            "type": "string"
+          },
+          "available_plans": {
+            "items": {
+              "$ref": "#/components/schemas/PlanOption"
+            },
+            "title": "Available Plans",
+            "type": "array"
+          },
+          "fraction_used": {
+            "title": "Fraction Used",
+            "type": "number"
+          },
+          "monthly_request_limit": {
+            "title": "Monthly Request Limit",
+            "type": "integer"
+          },
+          "plan_id": {
+            "title": "Plan Id",
+            "type": "string"
+          },
+          "plan_name": {
+            "title": "Plan Name",
+            "type": "string"
+          },
+          "plan_status": {
+            "title": "Plan Status",
+            "type": "string"
+          },
+          "remaining": {
+            "title": "Remaining",
+            "type": "integer"
+          },
+          "renews_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Renews At"
+          },
+          "requests_this_month": {
+            "title": "Requests This Month",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "plan_id",
+          "plan_name",
+          "plan_status",
+          "monthly_request_limit",
+          "requests_this_month",
+          "fraction_used",
+          "remaining",
+          "action",
+          "renews_at",
+          "available_plans"
+        ],
+        "title": "PlanResponse",
         "type": "object"
       },
       "ProjectResponse": {
@@ -2971,6 +3100,126 @@
         "summary": "Peer Benchmark",
         "tags": [
           "benchmark"
+        ]
+      }
+    },
+    "/billing/checkout-session": {
+      "post": {
+        "description": "Start a Stripe Checkout session for a plan change.",
+        "operationId": "checkout_session_billing_checkout_session_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CheckoutRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CheckoutResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Checkout Session",
+        "tags": [
+          "billing"
+        ]
+      }
+    },
+    "/billing/plan": {
+      "get": {
+        "description": "The caller's plan and where they stand against it.",
+        "operationId": "get_billing_plan_billing_plan_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PlanResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Get Billing Plan",
+        "tags": [
+          "billing"
+        ]
+      }
+    },
+    "/billing/webhook": {
+      "post": {
+        "description": "Apply a Stripe event \u2014 signature-verified and idempotent.\n\nUnauthenticated, because Stripe cannot hold a session. The signature *is*\nthe authentication, so it is verified before the payload is parsed as\nanything meaningful, and a deployment with no webhook secret rejects\neverything rather than trusting it.\n\nReads the raw body rather than a parsed model: the signature covers the\nexact bytes Stripe sent, and re-serialising a parsed body changes them.",
+        "operationId": "stripe_webhook_billing_webhook_post",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "Stripe-Signature",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Stripe-Signature",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Stripe Webhook Billing Webhook Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Stripe Webhook",
+        "tags": [
+          "billing"
         ]
       }
     },

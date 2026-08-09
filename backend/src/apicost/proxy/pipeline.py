@@ -44,6 +44,8 @@ from typing import Any
 import httpx
 
 from apicost.advisor.prompts import ContextVerdict, analyse_context
+from apicost.billing.plans import PlanAction, check_plan_limit, get_plan
+from apicost.billing.usage import monthly_request_count, record_request
 from apicost.budgets.enforcement import (
     BudgetDecision,
     BudgetSpec,
@@ -276,6 +278,16 @@ async def run_pipeline(request: ProxyRequest) -> PipelineResult:
             spent_usd=round(budget.spent_usd, 6),
         )
 
+    # -- [2a] Plan limits ------------------------------------------ BUILD_SPEC P10
+    #
+    # A *signal*, not a gate. Over the free cap the request is still served and
+    # the caller is told in the headers, because cutting off a developer's
+    # application mid-month is how this product loses them — and the traffic
+    # being refused is traffic they are already paying a provider for. Redis
+    # only, like the budget counter (hard rule 7).
+    plan = get_plan(request.resolved.plan_id)
+    plan_verdict = check_plan_limit(plan, await monthly_request_count(request.resolved.user_id))
+
     # -- [2b] Long-context advisory ----------------------------------- UC-26
     #
     # Advisory only (BUILD_SPEC §4 P7): this never alters the request. It runs
@@ -364,7 +376,7 @@ async def run_pipeline(request: ProxyRequest) -> PipelineResult:
 
     if hit is not None:
         # The provider is never called. This is the whole point.
-        return await _serve_from_cache(request, hit, started, timer, context)
+        return await _serve_from_cache(request, hit, started, timer, context, plan_verdict)
 
     # -- [4] Routing --------------------------------------------------------
     #
@@ -432,9 +444,18 @@ async def run_pipeline(request: ProxyRequest) -> PipelineResult:
             cache_context,
             routing_context,
             context,
+            plan_verdict,
         )
     return await _forward_unary(
-        request, api_key, model_used, started, deadline, cache_context, routing_context, context
+        request,
+        api_key,
+        model_used,
+        started,
+        deadline,
+        cache_context,
+        routing_context,
+        context,
+        plan_verdict,
     )
 
 
@@ -452,6 +473,7 @@ async def _forward_unary(
     cache_context: _CacheContext | None = None,
     routing_context: _RoutingContext | None = None,
     context: ContextVerdict | None = None,
+    plan_verdict: Any = None,
 ) -> PipelineResult:
     """Non-streamed forward."""
     provider = request.provider
@@ -509,6 +531,7 @@ async def _forward_unary(
                 cache_hit=False,
                 reason_code=routing_context.reason_code if routing_context else REASON_PASSTHROUGH,
                 context=context,
+                plan_verdict=plan_verdict,
             ),
         )
 
@@ -578,6 +601,7 @@ async def _forward_unary(
             cache_hit=False,
             reason_code=routing_context.reason_code if routing_context else REASON_PASSTHROUGH,
             context=context,
+            plan_verdict=plan_verdict,
         ),
     )
 
@@ -591,6 +615,7 @@ async def _forward_streaming(
     cache_context: _CacheContext | None = None,
     routing_context: _RoutingContext | None = None,
     context: ContextVerdict | None = None,
+    plan_verdict: Any = None,
 ) -> PipelineResult:
     """Streamed forward with a non-buffering tee.
 
@@ -696,6 +721,7 @@ async def _forward_streaming(
             cache_hit=False,
             reason_code=routing_context.reason_code if routing_context else REASON_PASSTHROUGH,
             context=context,
+            plan_verdict=plan_verdict,
         ),
     )
 
@@ -867,6 +893,9 @@ async def _record(
         [str(b.get("period")) for b in request.resolved.budgets],
     )
 
+    # Plan volume, counted per request rather than per dollar. Same round trip.
+    await record_request(redis, request.resolved.user_id)
+
     if timer is not None:
         timer.mark("ledger_emit", time.perf_counter())
 
@@ -949,6 +978,7 @@ def _metadata_headers(
     reason_code: str = REASON_PASSTHROUGH,
     elapsed_ms: float | None = None,
     context: ContextVerdict | None = None,
+    plan_verdict: Any = None,
 ) -> dict[str, str]:
     """APICost metadata, in headers only (BUILD_SPEC §0.5).
 
@@ -961,6 +991,11 @@ def _metadata_headers(
         "X-APICost-Model-Used": model_used,
         "X-APICost-Reason": reason_code,
     }
+    if plan_verdict is not None and plan_verdict.action is not PlanAction.ALLOW:
+        headers["X-APICost-Plan"] = plan_verdict.plan_id
+        headers["X-APICost-Plan-Usage"] = f"{plan_verdict.used}/{plan_verdict.limit}"
+        headers["X-APICost-Plan-Notice"] = plan_verdict.reason
+
     if context is not None and context.warn:
         # A header, not a body field (hard rule 6). Counts only — the advice is
         # "you resent ~1,900 tokens that look unrelated", which is actionable
@@ -995,6 +1030,7 @@ async def _serve_from_cache(
     started: float,
     timer: StageTimer | None = None,
     context: ContextVerdict | None = None,
+    plan_verdict: Any = None,
 ) -> PipelineResult:
     """Return a cached response without calling the provider.
 
@@ -1035,7 +1071,12 @@ async def _serve_from_cache(
     )
 
     headers = _metadata_headers(
-        request, hit.model_used, cache_hit=True, elapsed_ms=latency_ms, context=context
+        request,
+        hit.model_used,
+        cache_hit=True,
+        elapsed_ms=latency_ms,
+        context=context,
+        plan_verdict=plan_verdict,
     )
 
     if request.stream:

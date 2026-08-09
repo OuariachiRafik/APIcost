@@ -23,6 +23,7 @@ dependencies = [
     "cryptography>=44.0",
     "email-validator>=2.2",
     "arq>=0.26",
+    "stripe>=11.4",
 ]
 
 [dependency-groups]

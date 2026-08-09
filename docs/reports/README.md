@@ -18,3 +18,4 @@ would otherwise have shipped looking correct, along with why they were invisible
 | P7 | [Prompt & context optimization](p7-prompt-optimization.md) | ✅ complete |
 | P8 | [Decision support & advisory](p8-decision-support.md) | ✅ complete |
 | P9 | [Engagement & retention](p9-engagement.md) | ✅ complete |
+| P10 | [Our own billing](p10-billing.md) | ✅ complete |

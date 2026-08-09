@@ -293,6 +293,74 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/billing/checkout-session": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Checkout Session
+         * @description Start a Stripe Checkout session for a plan change.
+         */
+        post: operations["checkout_session_billing_checkout_session_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/billing/plan": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Billing Plan
+         * @description The caller's plan and where they stand against it.
+         */
+        get: operations["get_billing_plan_billing_plan_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/billing/webhook": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Stripe Webhook
+         * @description Apply a Stripe event — signature-verified and idempotent.
+         *
+         *     Unauthenticated, because Stripe cannot hold a session. The signature *is*
+         *     the authentication, so it is verified before the payload is parsed as
+         *     anything meaningful, and a deployment with no webhook secret rejects
+         *     everything rather than trusting it.
+         *
+         *     Reads the raw body rather than a parsed model: the signature covers the
+         *     exact bytes Stripe sent, and re-serialising a parsed body changes them.
+         */
+        post: operations["stripe_webhook_billing_webhook_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/budgets": {
         parameters: {
             query?: never;
@@ -1017,6 +1085,16 @@ export interface components {
              */
             start: string;
         };
+        /** CheckoutRequest */
+        CheckoutRequest: {
+            /** Plan Id */
+            plan_id: string;
+        };
+        /** CheckoutResponse */
+        CheckoutResponse: {
+            /** Checkout Url */
+            checkout_url: string;
+        };
         /** CompressRequest */
         CompressRequest: {
             /**
@@ -1250,6 +1328,42 @@ export interface components {
             your_cost_per_request: number;
             /** Your Requests */
             your_requests: number;
+        };
+        /** PlanOption */
+        PlanOption: {
+            /** Id */
+            id: string;
+            /** Monthly Request Limit */
+            monthly_request_limit: number;
+            /** Name */
+            name: string;
+            /** Price Usd */
+            price_usd: number;
+            /** Purchasable */
+            purchasable: boolean;
+        };
+        /** PlanResponse */
+        PlanResponse: {
+            /** Action */
+            action: string;
+            /** Available Plans */
+            available_plans: components["schemas"]["PlanOption"][];
+            /** Fraction Used */
+            fraction_used: number;
+            /** Monthly Request Limit */
+            monthly_request_limit: number;
+            /** Plan Id */
+            plan_id: string;
+            /** Plan Name */
+            plan_name: string;
+            /** Plan Status */
+            plan_status: string;
+            /** Remaining */
+            remaining: number;
+            /** Renews At */
+            renews_at: string | null;
+            /** Requests This Month */
+            requests_this_month: number;
         };
         /** ProjectResponse */
         ProjectResponse: {
@@ -2128,6 +2242,92 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["PeerBenchmarkResponse"];
+                };
+            };
+        };
+    };
+    checkout_session_billing_checkout_session_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CheckoutRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CheckoutResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_billing_plan_billing_plan_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PlanResponse"];
+                };
+            };
+        };
+    };
+    stripe_webhook_billing_webhook_post: {
+        parameters: {
+            query?: never;
+            header?: {
+                "Stripe-Signature"?: string;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
                 };
             };
         };

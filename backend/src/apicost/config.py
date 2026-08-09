@@ -108,6 +108,14 @@ class Settings(BaseSettings):
     smtp_port: int = 1025
     email_from: str = "apicost@localhost"
     public_base_url: str = "http://localhost:8001"
+    web_base_url: str = "http://localhost:5173"
+    """Where Stripe Checkout returns the user. The SPA, not the API."""
+
+    stripe_secret_key: SecretStr = SecretStr("")
+    stripe_webhook_secret: SecretStr = SecretStr("")
+    """Empty means billing is not configured. The webhook then fails closed
+    rather than trusting unverified input."""
+
     """Origin used to build links in outbound email — unsubscribe, mainly.
 
     Must be the API's public origin, not the SPA's: the unsubscribe link has to

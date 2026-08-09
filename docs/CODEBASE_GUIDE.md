@@ -117,7 +117,11 @@ the request still succeeds.
 | Change budget periods or enforcement | `budgets/enforcement.py` — Redis only, never Postgres |
 | Change anomaly thresholds | `config.py`, then `anomaly/zscore.py`, `anomaly/forest.py` |
 | Change what a baseline *is* | `stats/rolling.py` (pure); its storage is `anomaly/store.py` ([ADR 0008](adr/0008-stats-purity-vs-spec-layout.md)) |
-| Add an email or alert type | `notify/email.py`, `anomaly/alerts.py` |
+| Add an email or alert type | `notify/email.py`, `anomaly/alerts.py`, `notify/digest.py` |
+| Change plans or prices | `billing/plans.py` — the `stripe_price_id`s are placeholders, see P10's report |
+| Touch the Stripe webhook | `billing/stripe_gateway.py` — read the module docstring first; it is a public unauthenticated endpoint that changes entitlements |
+| Change the peer-benchmark disclosure rules | `advisor/benchmark.py` — the ≥50 floor is a k-anonymity guarantee, not a tuning knob |
+| Regenerate the TypeScript client | `make api-types`; `make check` fails if it has drifted |
 | Change long-context detection | `advisor/prompts.py` (pure); it runs on the proxy inside a 5 ms budget |
 | Change GPU prices or throughput | `advisor/nightly.py:GPU_OPTIONS` — hardcoded and will go stale, see P8's report |
 | Change what earns a recommendation | `advisor/downgrade.py`, `advisor/breakeven.py` (both pure) |

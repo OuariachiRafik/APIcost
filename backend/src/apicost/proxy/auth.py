@@ -75,6 +75,10 @@ class ResolvedKey:
     data plane must not query Postgres on the hot path (CODEBASE_GUIDE §2), and
     rules change far less often than requests arrive."""
 
+    plan_id: str = "free"
+    """The account's plan, for the P10 volume signal. Carried in the cached
+    resolution like everything else the hot path needs (hard rule 7)."""
+
     budgets: list[dict[str, Any]] = field(default_factory=list)
     """Budget *definitions* only — period, limit, action (UC-29, UC-30). The
     spend counters they are compared against live in Redis and are read per
@@ -178,12 +182,22 @@ async def _resolve_from_database(key_hash: str) -> ResolvedKey:
     async with session_scope() as session:
         result = await session.execute(select(ProxyKey).where(ProxyKey.proxy_key_hash == key_hash))
         proxy_key = result.scalar_one_or_none()
+        plan_id = "free"
 
         if proxy_key is None:
             raise AuthenticationError("Invalid proxy key")
 
         # Now we know who this is — scope the session before touching projects.
         await set_rls_user(session, proxy_key.user_id)
+
+        plan_row = (
+            await session.execute(
+                text("SELECT plan_id FROM users WHERE id = :id"),
+                {"id": proxy_key.user_id},
+            )
+        ).first()
+        if plan_row is not None:
+            plan_id = str(plan_row.plan_id)
 
         project_result = await session.execute(
             select(Project).where(
@@ -253,6 +267,7 @@ async def _resolve_from_database(key_hash: str) -> ResolvedKey:
         store_raw_content=project.store_raw_content,
         routing_rules=rules,
         budgets=budgets,
+        plan_id=plan_id,
     )
 
 

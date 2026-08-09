@@ -121,6 +121,10 @@ async def api_base(monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[AsyncClient
 _CLEANUP_TABLES = (
     # Children before parents, so foreign keys never block a delete.
     "requests_log",
+    # Not user-scoped, but its primary key is Stripe's event id and that is the
+    # idempotency mechanism — leaving rows behind makes a webhook test pass in
+    # isolation and fail in a suite that ran it before.
+    "billing_events",
     "cache_entries",
     "usage_rollup_daily",
     "token_bucket_rollup_daily",
