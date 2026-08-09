@@ -45,6 +45,20 @@ def _completion(model: str, content: str = COMPLETION_TEXT) -> dict[str, Any]:
 def build_stub_provider() -> FastAPI:
     app = FastAPI()
 
+    @app.get("/_last_request")
+    async def last_request() -> Any:
+        """What the provider actually received.
+
+        The stub runs as its own process, so a test cannot read
+        ``received_requests`` directly. This is the only way to assert on what
+        the proxy *forwarded* rather than on what it returned — which for
+        advisory features (P7) is the difference between a suggestion and a
+        silent rewrite.
+        """
+        if not received_requests:
+            return JSONResponse(status_code=404, content={"error": "nothing received yet"})
+        return received_requests[-1]["body"]
+
     @app.post("/chat/completions")
     async def chat_completions(request: Request) -> Any:
         body = await request.json()
@@ -137,12 +151,22 @@ def build_stub_provider() -> FastAPI:
         received_requests.append(
             {"body": body, "authorization": request.headers.get("authorization")}
         )
+        # Usage scales with the input, as a real provider's does. A fixed count
+        # here would make every embeddings request look identical in the ledger
+        # and would quietly invalidate any test about token volume.
+        raw_input = body.get("input", "")
+        if isinstance(raw_input, list):
+            text_length = sum(len(item) for item in raw_input if isinstance(item, str))
+        else:
+            text_length = len(str(raw_input))
+        prompt_tokens = max(1, text_length // 4)
+
         return JSONResponse(
             {
                 "object": "list",
                 "data": [{"object": "embedding", "index": 0, "embedding": [0.1, 0.2, 0.3]}],
                 "model": body.get("model", "text-embedding-3-small"),
-                "usage": {"prompt_tokens": 8, "total_tokens": 8},
+                "usage": {"prompt_tokens": prompt_tokens, "total_tokens": prompt_tokens},
             }
         )
 

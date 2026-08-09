@@ -72,6 +72,12 @@ class LedgerEvent:
     routing_model_version: str | None = None
     escalation_triggered: bool = False
 
+    context_warning: bool = False
+    """UC-26: this request resent history that looked stale. A verdict, never
+    the prompt it was computed from (hard rule 9)."""
+    context_reclaimable_tokens: int | None = None
+    context_message_count: int | None = None
+
     status: int = 200
     error_code: str | None = None
     streamed: bool = False

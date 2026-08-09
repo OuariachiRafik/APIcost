@@ -120,6 +120,9 @@ def parse_event_fields(fields: dict[str, str]) -> dict[str, Any] | None:
         "routing_reason_code": fields.get("routing_reason_code"),
         "routing_model_version": fields.get("routing_model_version"),
         "escalation_triggered": _as_bool(fields.get("escalation_triggered")),
+        "context_warning": _as_bool(fields.get("context_warning")),
+        "context_reclaimable_tokens": _as_int(fields.get("context_reclaimable_tokens")),
+        "context_message_count": _as_int(fields.get("context_message_count")),
         "status": _as_int(fields.get("status"), 200),
         "error_code": fields.get("error_code"),
         "streamed": _as_bool(fields.get("streamed")),
@@ -133,13 +136,15 @@ _INSERT_SQL = text(
         model_requested, model_used, tokens_in, tokens_out, tokens_estimated,
         cost_usd, cost_would_have_been_usd, latency_ms, ttft_ms, itl_ms, tps,
         cache_hit, cache_similarity, routed, routing_reason_code,
-        routing_model_version, escalation_triggered, status, error_code, streamed
+        routing_model_version, escalation_triggered, status, error_code, streamed,
+        context_warning, context_reclaimable_tokens, context_message_count
     ) VALUES (
         :id, :timestamp, :user_id, :project_id, :request_id, :endpoint, :provider,
         :model_requested, :model_used, :tokens_in, :tokens_out, :tokens_estimated,
         :cost_usd, :cost_would_have_been_usd, :latency_ms, :ttft_ms, :itl_ms, :tps,
         :cache_hit, :cache_similarity, :routed, :routing_reason_code,
-        :routing_model_version, :escalation_triggered, :status, :error_code, :streamed
+        :routing_model_version, :escalation_triggered, :status, :error_code, :streamed,
+        :context_warning, :context_reclaimable_tokens, :context_message_count
     )
     ON CONFLICT DO NOTHING
     """

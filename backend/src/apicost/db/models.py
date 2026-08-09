@@ -249,6 +249,10 @@ class RequestLog(Base):
     routing_model_version: Mapped[str | None] = mapped_column(Text, nullable=True)
     escalation_triggered: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
 
+    context_warning: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    context_reclaimable_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    context_message_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
     status: Mapped[int] = mapped_column(Integer, nullable=False, default=200)
     error_code: Mapped[str | None] = mapped_column(Text, nullable=True)
     streamed: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)

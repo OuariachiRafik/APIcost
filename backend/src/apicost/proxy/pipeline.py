@@ -43,6 +43,7 @@ from typing import Any
 
 import httpx
 
+from apicost.advisor.prompts import ContextVerdict, analyse_context
 from apicost.budgets.enforcement import (
     BudgetDecision,
     BudgetSpec,
@@ -92,6 +93,11 @@ _logger = get_logger(__name__)
 REASON_PASSTHROUGH = "PASSTHROUGH"
 REASON_CACHE_HIT = "CACHE_HIT"
 REASON_BUDGET_THROTTLED = "BUDGET_THROTTLED"
+
+CONTEXT_BUDGET_MS = 5.0
+"""UC-26 is advice. It gets a small slice of the shared deadline and is the
+first thing dropped when time is short — a user who wanted a warning about
+their prompt would not trade latency on the request for it."""
 
 ROUTING_BUDGET_MS = 20.0
 """BUILD_SPEC §4 P5: a classifier stall past this is a passthrough, not a
@@ -270,6 +276,19 @@ async def run_pipeline(request: ProxyRequest) -> PipelineResult:
             spent_usd=round(budget.spent_usd, 6),
         )
 
+    # -- [2b] Long-context advisory ----------------------------------- UC-26
+    #
+    # Advisory only (BUILD_SPEC §4 P7): this never alters the request. It runs
+    # before the cache so that the warning is attached to what the *caller*
+    # sent — a cache hit still resent the same bloated history and still costs
+    # them that on the next miss.
+    context: ContextVerdict | None = None
+    async with failopen("context_advisory", deadline, budget_ms=CONTEXT_BUDGET_MS) as guard:
+        context = analyse_context(request.body)
+    if guard.failed:
+        context = None
+    timer.mark("context", time.perf_counter())
+
     # -- [3] Semantic cache -------------------------------------------------
     #
     # Everything here is inside failopen: a cache that raises, hangs, or blows
@@ -345,7 +364,7 @@ async def run_pipeline(request: ProxyRequest) -> PipelineResult:
 
     if hit is not None:
         # The provider is never called. This is the whole point.
-        return await _serve_from_cache(request, hit, started, timer)
+        return await _serve_from_cache(request, hit, started, timer, context)
 
     # -- [4] Routing --------------------------------------------------------
     #
@@ -405,10 +424,17 @@ async def run_pipeline(request: ProxyRequest) -> PipelineResult:
 
     if request.stream:
         return await _forward_streaming(
-            request, api_key, model_used, started, deadline, cache_context, routing_context
+            request,
+            api_key,
+            model_used,
+            started,
+            deadline,
+            cache_context,
+            routing_context,
+            context,
         )
     return await _forward_unary(
-        request, api_key, model_used, started, deadline, cache_context, routing_context
+        request, api_key, model_used, started, deadline, cache_context, routing_context, context
     )
 
 
@@ -425,6 +451,7 @@ async def _forward_unary(
     deadline: Deadline,
     cache_context: _CacheContext | None = None,
     routing_context: _RoutingContext | None = None,
+    context: ContextVerdict | None = None,
 ) -> PipelineResult:
     """Non-streamed forward."""
     provider = request.provider
@@ -468,6 +495,7 @@ async def _forward_unary(
             # this here would report it as a passthrough and quietly understate
             # what routing was doing when things went wrong.
             routing_context=routing_context,
+            context=context,
         )
         return PipelineResult(
             status_code=response.status_code,
@@ -480,6 +508,7 @@ async def _forward_unary(
                 model_used,
                 cache_hit=False,
                 reason_code=routing_context.reason_code if routing_context else REASON_PASSTHROUGH,
+                context=context,
             ),
         )
 
@@ -517,6 +546,7 @@ async def _forward_unary(
         status=response.status_code,
         routing_context=routing_context,
         escalated=escalated,
+        context=context,
     )
 
     if cache_context is not None:
@@ -547,6 +577,7 @@ async def _forward_unary(
             model_used,
             cache_hit=False,
             reason_code=routing_context.reason_code if routing_context else REASON_PASSTHROUGH,
+            context=context,
         ),
     )
 
@@ -559,6 +590,7 @@ async def _forward_streaming(
     deadline: Deadline,
     cache_context: _CacheContext | None = None,
     routing_context: _RoutingContext | None = None,
+    context: ContextVerdict | None = None,
 ) -> PipelineResult:
     """Streamed forward with a non-buffering tee.
 
@@ -663,6 +695,7 @@ async def _forward_streaming(
             model_used,
             cache_hit=False,
             reason_code=routing_context.reason_code if routing_context else REASON_PASSTHROUGH,
+            context=context,
         ),
     )
 
@@ -672,13 +705,48 @@ async def _forward_streaming(
 # ---------------------------------------------------------------------------
 
 
+def _prompt_text(body: dict[str, Any]) -> str:
+    """The billable input text, whatever endpoint shape carried it.
+
+    Three forms, because reading only ``messages`` under-counts two of them to
+    almost nothing:
+
+    - ``messages`` — chat completions.
+    - ``input`` — embeddings, a string or a list of strings. This is the one
+      that bit: a 2,000-token embedding request was ledgered at 8 tokens, so
+      embeddings traffic was invisible in spend, in the token-heavy report, and
+      in any savings figure derived from them.
+    - ``prompt`` — the legacy completions API, string or list.
+    """
+    messages = body.get("messages")
+    if isinstance(messages, list):
+        parts: list[str] = []
+        for message in messages:
+            if not isinstance(message, dict):
+                continue
+            content = message.get("content")
+            if isinstance(content, str):
+                parts.append(content)
+            elif isinstance(content, list):
+                # Multimodal content parts; only the text is billable as text.
+                for part in content:
+                    if isinstance(part, dict) and isinstance(part.get("text"), str):
+                        parts.append(part["text"])
+        return " ".join(parts)
+
+    for field_name in ("input", "prompt"):
+        value = body.get(field_name)
+        if isinstance(value, str):
+            return value
+        if isinstance(value, list):
+            return " ".join(item for item in value if isinstance(item, str))
+
+    return ""
+
+
 def _estimate_usage(request: ProxyRequest, body: dict[str, Any]) -> Usage:
     """Fall back to estimation when the provider omits usage (§6.2)."""
-    prompt_text = " ".join(
-        str(message.get("content", ""))
-        for message in request.body.get("messages", [])
-        if isinstance(message, dict)
-    )
+    prompt_text = _prompt_text(request.body)
     completion_text = ""
     for choice in body.get("choices", []):
         if isinstance(choice, dict):
@@ -711,6 +779,7 @@ async def _record(
     timer: StageTimer | None = None,
     routing_context: _RoutingContext | None = None,
     escalated: bool = False,
+    context: ContextVerdict | None = None,
 ) -> None:
     """Build and enqueue the ledger event. Never raises."""
     now = datetime.now(UTC)
@@ -769,6 +838,9 @@ async def _record(
         ),
         routing_model_version=routing_context.model_version if routing_context else None,
         escalation_triggered=escalated,
+        context_warning=context.warn if context else False,
+        context_reclaimable_tokens=context.reclaimable_tokens if context else None,
+        context_message_count=context.message_count if context else None,
     )
 
     if timer is not None:
@@ -876,6 +948,7 @@ def _metadata_headers(
     cache_hit: bool,
     reason_code: str = REASON_PASSTHROUGH,
     elapsed_ms: float | None = None,
+    context: ContextVerdict | None = None,
 ) -> dict[str, str]:
     """APICost metadata, in headers only (BUILD_SPEC §0.5).
 
@@ -888,6 +961,13 @@ def _metadata_headers(
         "X-APICost-Model-Used": model_used,
         "X-APICost-Reason": reason_code,
     }
+    if context is not None and context.warn:
+        # A header, not a body field (hard rule 6). Counts only — the advice is
+        # "you resent ~1,900 tokens that look unrelated", which is actionable
+        # without echoing anything the user wrote.
+        headers["X-APICost-Context-Warning"] = "stale-history"
+        headers["X-APICost-Context-Reclaimable-Tokens"] = str(context.reclaimable_tokens)
+
     if elapsed_ms is not None:
         # The time *we* added, measured inside the process. A user comparing us
         # against calling the provider directly deserves that number without
@@ -914,6 +994,7 @@ async def _serve_from_cache(
     hit: CacheHit,
     started: float,
     timer: StageTimer | None = None,
+    context: ContextVerdict | None = None,
 ) -> PipelineResult:
     """Return a cached response without calling the provider.
 
@@ -938,6 +1019,7 @@ async def _serve_from_cache(
         cache_similarity=hit.similarity,
         cost_override="0",
         timer=timer,
+        context=context,
     )
 
     if timer is not None:
@@ -952,7 +1034,9 @@ async def _serve_from_cache(
         **(timer.as_log_fields() if timer is not None else {}),
     )
 
-    headers = _metadata_headers(request, hit.model_used, cache_hit=True, elapsed_ms=latency_ms)
+    headers = _metadata_headers(
+        request, hit.model_used, cache_hit=True, elapsed_ms=latency_ms, context=context
+    )
 
     if request.stream:
         # Re-chunked as SSE so a streaming client cannot tell the difference
