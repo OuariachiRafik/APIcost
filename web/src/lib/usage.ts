@@ -5,100 +5,20 @@ export type TimeRange = 'today' | '7d' | '30d' | '90d';
 export type BreakdownDimension = 'model' | 'project' | 'endpoint' | 'provider';
 export type Decision = 'cache_hit' | 'routed' | 'passthrough' | 'escalated' | 'error';
 
-export interface UsagePoint {
-  bucket: string;
-  cost_usd: string;
-  cost_would_have_been_usd: string;
-  requests: number;
-  tokens_in: number;
-  tokens_out: number;
-  cache_hits: number;
-}
+import type { components } from './schema';
 
-export interface UsageSummary {
-  total_cost_usd: string;
-  total_would_have_been_usd: string;
-  cache_savings_usd: string;
-  routing_savings_usd: string;
-  total_requests: number;
-  cache_hits: number;
-  cache_hit_rate: number;
-  total_tokens_in: number;
-  total_tokens_out: number;
-}
+type Schemas = components['schemas'];
 
-export interface UsageResponse {
-  range: string;
-  start: string;
-  end: string;
-  bucket: string;
-  summary: UsageSummary;
-  series: UsagePoint[];
-}
-
-export interface BreakdownRow {
-  key: string;
-  cost_usd: string;
-  requests: number;
-  tokens_in: number;
-  tokens_out: number;
-  avg_tokens: number;
-  share: number;
-}
-
-export interface BreakdownResponse {
-  by: string;
-  rows: BreakdownRow[];
-}
-
-export interface HistogramBucket {
-  label: string;
-  lower: number;
-  upper: number | null;
-  requests: number;
-  cost_usd: string;
-}
-
-export interface TokenDistributionResponse {
-  buckets: HistogramBucket[];
-  /** Bucket floor, not an exact percentile — see ADR 0006. */
-  median_tokens_bucket: number;
-  p95_tokens_bucket: number;
-}
-
-export interface RequestRow {
-  id: string;
-  request_id: string;
-  timestamp: string;
-  project_id: string;
-  endpoint: string;
-  provider: string;
-  decision: Decision;
-  model_requested: string;
-  model_used: string;
-  tokens_in: number;
-  tokens_out: number;
-  tokens_estimated: boolean;
-  cost_usd: string;
-  cost_would_have_been_usd: string | null;
-  saved_usd: string;
-  latency_ms: number;
-  ttft_ms: number | null;
-  cache_hit: boolean;
-  cache_similarity: number | null;
-  routed: boolean;
-  routing_reason_code: string | null;
-  escalation_triggered: boolean;
-  status: number;
-  error_code: string | null;
-  streamed: boolean;
-}
-
-export interface RequestPage {
-  rows: RequestRow[];
-  next_cursor: string | null;
-  has_more: boolean;
-}
+// Aliases into the generated schema (`make api-types`). See lib/api.ts for why.
+export type UsagePoint = Schemas['UsagePoint'];
+export type UsageSummary = Schemas['UsageSummary'];
+export type UsageResponse = Schemas['UsageResponse'];
+export type BreakdownRow = Schemas['BreakdownRow'];
+export type BreakdownResponse = Schemas['BreakdownResponse'];
+export type HistogramBucket = Schemas['HistogramBucket'];
+export type TokenDistributionResponse = Schemas['TokenDistributionResponse'];
+export type RequestRow = Schemas['RequestRow'];
+export type RequestPage = Schemas['RequestPage'];
 
 function query(params: Record<string, string | number | undefined>): string {
   const search = new URLSearchParams();

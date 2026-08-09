@@ -1,0 +1,9 @@
+# Generated from the API's OpenAPI schema by `make api-types`.
+# Formatting a generated file only guarantees it looks different after the next
+# regeneration. The generator's output is the contract; prettier has no opinion
+# worth having about it.
+src/lib/schema.d.ts
+openapi.json
+
+dist
+node_modules

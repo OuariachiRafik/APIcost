@@ -37,12 +37,27 @@ class ContextWarningRow(BaseModel):
     estimated_wasted_usd: float
 
 
-class ContextReport(BaseModel):
+class PromptOptimizationReport(BaseModel):
+    """UC-26, UC-27 and UC-28 in one payload, per BUILD_SPEC §8.
+
+    The two halves belong together: knowing an endpoint is token-heavy is only
+    actionable once you also know how much of those tokens is stale history.
+    Split across two endpoints, a dashboard would have to join them to say
+    anything useful.
+    """
+
     warned_requests: int
     total_requests: int
     warned_fraction: float
     estimated_wasted_usd: float
     by_endpoint: list[ContextWarningRow]
+    token_heavy: list[TokenHeavyRow]
+    """UC-28, ranked by average tokens per request.
+
+    `GET /usage/breakdown?by=endpoint` (P3) also exposes `avg_tokens` and can
+    answer UC-28 on its own. This is the same fact reported next to the context
+    warnings, which is where it leads to an action; the breakdown endpoint
+    remains the general-purpose one. See ADR 0009."""
 
 
 class TokenHeavyRow(BaseModel):
@@ -129,17 +144,21 @@ async def compress(payload: CompressRequest, user: CurrentUser) -> CompressRespo
     )
 
 
-@router.get("/advisor/context")
-async def context_report(
+@router.get("/advisor/prompt-optimizations")
+async def prompt_optimizations(
     user: CurrentUser,
     session: DbSession,
     project_id: str,
     range: TimeRange = "30d",
-) -> ContextReport:
-    """Which endpoints resend the most stale history — UC-26.
+) -> PromptOptimizationReport:
+    """Prompt and context optimisation opportunities — UC-26, UC-28.
 
     Reads the flags the proxy recorded, not prompts. A project that never opted
     into storing raw content gets exactly the same report.
+
+    UC-27's *suggestion* is a separate POST: generating a compressed candidate
+    needs the prompt itself, and we do not store prompts (hard rule 9), so it
+    cannot be served from a GET over history.
     """
     await require_project(project_id, user, session)
     start, end, _ = resolve_window(range, None, None)
@@ -193,21 +212,22 @@ async def context_report(
             )
         )
 
-    return ContextReport(
+    return PromptOptimizationReport(
         warned_requests=warned,
         total_requests=total,
         warned_fraction=round(warned / total, 4) if total else 0.0,
         estimated_wasted_usd=round(wasted, 6),
         by_endpoint=by_endpoint,
+        token_heavy=await _token_heavy(session, user.id, project_id, start, end),
     )
 
 
-@router.get("/advisor/token-heavy")
-async def token_heavy_endpoints(
-    user: CurrentUser,
-    session: DbSession,
+async def _token_heavy(
+    session: Any,
+    user_id: str,
     project_id: str,
-    range: TimeRange = "30d",
+    start: Any,
+    end: Any,
     limit: int = 20,
 ) -> list[TokenHeavyRow]:
     """Endpoints ranked by average tokens per request — UC-28.
@@ -217,9 +237,6 @@ async def token_heavy_endpoints(
     identifies the endpoint whose *shape* is expensive, which is the one worth
     changing.
     """
-    await require_project(project_id, user, session)
-    start, end, _ = resolve_window(range, None, None)
-
     rows = (
         await session.execute(
             text(
@@ -239,7 +256,7 @@ async def token_heavy_endpoints(
                 """
             ),
             {
-                "user_id": user.id,
+                "user_id": user_id,
                 "project_id": project_id,
                 "start": start,
                 "end": end,

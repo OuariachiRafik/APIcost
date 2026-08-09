@@ -13,7 +13,7 @@ COMPOSE := docker compose
 NPM     := npm --prefix web
 
 .PHONY: help dev down logs test test-backend test-web lint lint-backend lint-web \
-        format migrate downgrade revision seed install check
+        format migrate downgrade revision seed install check api-types api-types-check
 
 help: ## Show available targets
 	@grep -hE '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) \
@@ -83,7 +83,22 @@ format: ## Apply ruff and prettier formatting
 	$(BACKEND) ruff check --fix .
 	$(NPM) run format
 
-check: lint test ## Everything CI runs
+check: api-types-check lint test ## Everything CI runs
+
+api-types-check: ## Fail if the committed client has drifted from the schema
+	@$(MAKE) --no-print-directory api-types
+	@# `git status --porcelain`, not `git diff --quiet`: diff only compares
+	@# tracked files, so before these were committed the guard passed happily
+	@# on a deliberately drifted schema. status catches modified and untracked.
+	@test -z "$$(git status --porcelain -- web/openapi.json web/src/lib/schema.d.ts)" || { \
+	  echo ""; \
+	  echo "The generated API client is stale. A response model changed and"; \
+	  echo "web/src/lib/schema.d.ts was not regenerated. Run 'make api-types'"; \
+	  echo "and commit the result."; \
+	  echo ""; \
+	  git --no-pager diff --stat -- web/openapi.json web/src/lib/schema.d.ts; \
+	  exit 1; \
+	}
 
 # ---------------------------------------------------------------------------
 # Database
@@ -101,3 +116,14 @@ revision: ## Autogenerate a migration: make revision m="add users"
 
 seed: ## Demo user + synthetic ledger history (rows=N to change volume)
 	$(BACKEND) python scripts/seed.py --rows $(or $(rows),50000)
+
+# ---------------------------------------------------------------------------
+# Generated client
+# ---------------------------------------------------------------------------
+
+# BUILD_SPEC §8: the OpenAPI schema is the source of truth for the TypeScript
+# client. Both outputs are committed so a frontend checkout builds without a
+# Python toolchain; `make check` re-runs this and fails if they have drifted.
+api-types: ## Regenerate web/src/lib/schema.d.ts from the API's OpenAPI schema
+	$(BACKEND) python scripts/dump_openapi.py ../web/openapi.json
+	$(NPM) run gen:api

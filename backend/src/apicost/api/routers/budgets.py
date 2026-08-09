@@ -10,9 +10,10 @@ from typing import Any, Literal
 
 from fastapi import APIRouter, Query, status
 from pydantic import BaseModel, Field
-from sqlalchemy import select, text
+from sqlalchemy import select, text, tuple_
 
 from apicost.api.deps import CurrentUser, DbSession, require_project
+from apicost.api.routers.requests import decode_cursor, encode_cursor
 from apicost.budgets.enforcement import budget_counter_key
 from apicost.core.errors import NotFoundError
 from apicost.core.ids import new_id
@@ -81,6 +82,19 @@ class AlertResponse(BaseModel):
     resolved_at: datetime | None
     resolution: str | None
     created_at: datetime
+
+
+class AlertPage(BaseModel):
+    """Cursor-paginated, per the §8 convention.
+
+    `alert_events` is the only table here that grows without bound — budgets
+    are capped at one per period per project and recommendations are replaced
+    nightly, so both are bounded by construction and return plain lists. This
+    one is a history, and a year-old incident is still a row. See ADR 0009.
+    """
+
+    alerts: list[AlertResponse]
+    next_cursor: str | None
 
 
 class ResolveAlertRequest(BaseModel):
@@ -192,14 +206,16 @@ async def delete_budget(budget_id: str, user: CurrentUser, session: DbSession) -
 # -- Alert history ---------------------------------------------------- UC-34
 
 
-@router.get("/alerts")
+@router.get("/alert-events")
 async def list_alerts(
     user: CurrentUser,
     session: DbSession,
     project_id: str | None = None,
     alert_status: str | None = Query(default=None, alias="status"),
     limit: int = Query(default=50, ge=1, le=200),
-) -> list[AlertResponse]:
+    cursor: str | None = None,
+) -> AlertPage:
+    """Alert history, newest first — UC-34."""
     query = select(AlertEvent).where(AlertEvent.user_id == user.id)
     if project_id:
         await require_project(project_id, user, session)
@@ -207,11 +223,31 @@ async def list_alerts(
     if alert_status:
         query = query.where(AlertEvent.status == alert_status)
 
-    result = await session.execute(query.order_by(AlertEvent.created_at.desc()).limit(limit))
-    return [_alert_response(a) for a in result.scalars()]
+    if cursor:
+        cursor_created, cursor_id = decode_cursor(cursor)
+        query = query.where(
+            tuple_(AlertEvent.created_at, AlertEvent.id) < (cursor_created, cursor_id)
+        )
+
+    # One extra row tells us whether another page exists without a count(*)
+    # over a growing table.
+    rows = list(
+        (
+            await session.execute(
+                query.order_by(AlertEvent.created_at.desc(), AlertEvent.id.desc()).limit(limit + 1)
+            )
+        ).scalars()
+    )
+
+    next_cursor = None
+    if len(rows) > limit:
+        rows = rows[:limit]
+        next_cursor = encode_cursor(rows[-1].created_at, rows[-1].id)
+
+    return AlertPage(alerts=[_alert_response(a) for a in rows], next_cursor=next_cursor)
 
 
-@router.post("/alerts/{alert_id}/resolve")
+@router.post("/alert-events/{alert_id}/resolve")
 async def resolve_alert(
     alert_id: str, payload: ResolveAlertRequest, user: CurrentUser, session: DbSession
 ) -> AlertResponse:

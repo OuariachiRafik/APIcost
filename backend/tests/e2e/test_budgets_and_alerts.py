@@ -454,7 +454,7 @@ async def test_the_kill_switch_records_itself_in_the_alert_history(
 
     await api_base.post(f"/projects/{project_id}/kill", headers=auth)
 
-    alerts = (await api_base.get("/alerts", headers=auth)).json()
+    alerts = (await api_base.get("/alert-events", headers=auth)).json()["alerts"]
     assert any(a["alert_type"] == "kill_switch" for a in alerts)
 
 
@@ -467,10 +467,10 @@ async def test_alerts_can_be_resolved_with_a_note(api_base: AsyncClient) -> None
     auth, project_id = await login(api_base, "resolve@example.com")
     await api_base.post(f"/projects/{project_id}/kill", headers=auth)
 
-    alert_id = (await api_base.get("/alerts", headers=auth)).json()[0]["id"]
+    alert_id = (await api_base.get("/alert-events", headers=auth)).json()["alerts"][0]["id"]
 
     response = await api_base.post(
-        f"/alerts/{alert_id}/resolve",
+        f"/alert-events/{alert_id}/resolve",
         headers=auth,
         json={"status": "resolved", "resolution": "Confirmed leak, rotated the key."},
     )
@@ -483,6 +483,33 @@ async def test_alerts_can_be_resolved_with_a_note(api_base: AsyncClient) -> None
 
 
 @pytest.mark.usefixtures("clean_all")
+async def test_alert_history_pages_with_a_cursor(api_base: AsyncClient) -> None:
+    """§8 convention. `alert_events` is a history and grows without bound."""
+    await provision_account(api_base, "paging@example.com")
+    auth, project_id = await login(api_base, "paging@example.com")
+
+    for _ in range(5):
+        await api_base.post(f"/projects/{project_id}/kill", headers=auth)
+
+    first = (await api_base.get("/alert-events?limit=2", headers=auth)).json()
+    assert len(first["alerts"]) == 2
+    assert first["next_cursor"]
+
+    second = (
+        await api_base.get(f"/alert-events?limit=2&cursor={first['next_cursor']}", headers=auth)
+    ).json()
+    assert len(second["alerts"]) == 2
+
+    seen = {a["id"] for a in first["alerts"]} | {a["id"] for a in second["alerts"]}
+    assert len(seen) == 4, "pages overlapped"
+
+    last = (
+        await api_base.get(f"/alert-events?limit=10&cursor={second['next_cursor']}", headers=auth)
+    ).json()
+    assert last["next_cursor"] is None
+
+
+@pytest.mark.usefixtures("clean_all")
 async def test_one_users_alerts_are_invisible_to_another(api_base: AsyncClient) -> None:
     """Hard rule 5, on the newest user-scoped table."""
     await provision_account(api_base, "alert-a@example.com")
@@ -492,10 +519,10 @@ async def test_one_users_alerts_are_invisible_to_another(api_base: AsyncClient) 
     await provision_account(api_base, "alert-b@example.com")
     auth_b, _ = await login(api_base, "alert-b@example.com")
 
-    assert (await api_base.get("/alerts", headers=auth_a)).json()
-    assert (await api_base.get("/alerts", headers=auth_b)).json() == []
+    assert (await api_base.get("/alert-events", headers=auth_a)).json()["alerts"]
+    assert (await api_base.get("/alert-events", headers=auth_b)).json()["alerts"] == []
 
-    stolen = await api_base.get(f"/alerts?project_id={project_a}", headers=auth_b)
+    stolen = await api_base.get(f"/alert-events?project_id={project_a}", headers=auth_b)
     assert stolen.status_code == 404
 
 

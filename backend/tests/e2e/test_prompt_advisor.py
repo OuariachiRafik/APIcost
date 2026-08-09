@@ -240,7 +240,9 @@ async def test_the_context_report_ranks_offending_endpoints(
 
     await drain_ledger()
 
-    response = await api_base.get(f"/advisor/context?project_id={project_id}", headers=auth)
+    response = await api_base.get(
+        f"/advisor/prompt-optimizations?project_id={project_id}", headers=auth
+    )
     assert response.status_code == 200, response.text
 
     body = response.json()
@@ -277,10 +279,12 @@ async def test_token_heavy_ranks_by_average_not_volume(
 
     await drain_ledger()
 
-    response = await api_base.get(f"/advisor/token-heavy?project_id={project_id}", headers=auth)
+    response = await api_base.get(
+        f"/advisor/prompt-optimizations?project_id={project_id}", headers=auth
+    )
     assert response.status_code == 200, response.text
 
-    rows = response.json()
+    rows = response.json()["token_heavy"]
     assert len(rows) >= 2
 
     averages = [r["avg_tokens_total"] for r in rows]
@@ -298,6 +302,6 @@ async def test_one_users_advisor_reports_are_invisible_to_another(
     await provision_account(api_base, "adv-b@example.com")
     auth_b, _ = await login(api_base, "adv-b@example.com")
 
-    for path in ("/advisor/context", "/advisor/token-heavy"):
+    for path in ("/advisor/prompt-optimizations", "/advisor/recommendations"):
         response = await api_base.get(f"{path}?project_id={project_a}", headers=auth_b)
         assert response.status_code == 404, f"{path} leaked across users"
