@@ -116,3 +116,11 @@ markers = [
     "integration: requires live Postgres and Redis (auto-skipped when unreachable)",
     "perf: benchmark against a seeded ledger. Excluded by default because it needs 1M rows that the functional tests truncate. Run with: make bench",
 ]
+
+[tool.coverage.run]
+# SQLAlchemy's async bridge runs the DBAPI portion inside a greenlet, and
+# coverage does not trace greenlet-switched frames unless told to. Without
+# this, every request handler that touches the database reports as uncovered
+# while its tests pass — `signup` showed 0% of its body against a test
+# asserting it returned 201. The measurement was wrong, not the tests.
+concurrency = ["thread", "greenlet"]
