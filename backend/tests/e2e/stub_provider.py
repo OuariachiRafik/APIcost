@@ -127,7 +127,11 @@ def build_stub_provider() -> FastAPI:
                     ).encode()
                     + b"\n\n"
                 )
-                await asyncio.sleep(0.002)
+                # 25 ms/word for the TTFT test, 2 ms otherwise. With a 2 ms
+                # gap the whole body is ~20 ms, which is the same order as
+                # scheduler jitter — a buffered and an unbuffered stream become
+                # indistinguishable. The slow variant makes the question sharp.
+                await asyncio.sleep(0.025 if model == "stub-slow-stream" else 0.002)
 
             final: dict[str, Any] = {
                 **template,

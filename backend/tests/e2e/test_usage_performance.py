@@ -60,6 +60,14 @@ async def seeded_user_auth() -> AsyncIterator[dict[str, str]]:
     at them: that `UPDATE` rewrote 841k rows, and the resulting dead tuples
     meant the benchmark was largely measuring table bloat it had just created.
     """
+    # Dispose before the first query, not only after the last one. Engines are
+    # cached process-wide and asyncpg connections are bound to the loop that
+    # opened them, so an earlier test file in the same session leaves one tied
+    # to a loop that is now closed. `make bench` runs the latency harness first
+    # and every test here then errored at setup with "attached to a different
+    # loop" — before even reaching the skip that says the ledger is too small.
+    await dispose_engine()
+
     count = await _row_count()
     if count < MIN_ROWS:
         pytest.skip(

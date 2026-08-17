@@ -111,8 +111,15 @@ async def test_streaming_time_to_first_token_is_not_delayed_by_the_tee(
     *total* stream duration rather than to the provider's own first byte.
     """
     proxy_key = await provision_account(api_base, "ttft@example.com")
+    # A deliberately slow stream. The default stub emits a word every 2 ms, so
+    # the entire body is ~20 ms — the same order as scheduler jitter, and a
+    # buffered stream is then indistinguishable from an unbuffered one.
+    # Measured with the fast stub across two runs: 53% and 91% of total spent
+    # before the first byte, for identical code. This variant sleeps 25 ms per
+    # word, so buffering means TTFT lands at ~100% of a ~300 ms stream and
+    # streaming means it lands near the first word.
     payload = {
-        "model": "gpt-4o",
+        "model": "stub-slow-stream",
         "messages": [{"role": "user", "content": "hi"}],
         "stream": True,
     }
@@ -129,8 +136,36 @@ async def test_streaming_time_to_first_token_is_not_delayed_by_the_tee(
             assert first is not None
             return first, total
 
-    proxy_first, proxy_total = await first_byte_ms(
-        f"{live_proxy.url}/v1/chat/completions", {"Authorization": f"Bearer {proxy_key}"}
+    headers = {"Authorization": f"Bearer {proxy_key}"}
+
+    # Caching off. This measures the *forwarding* tee, and a cache hit is
+    # replayed from memory in one burst — TTFT equal to total is correct there,
+    # not buffering. With caching on, the warm-up request populated the cache
+    # and the measured one was served from it: a 12 ms "stream" against the
+    # provider's 133 ms, which read as buffering and was nothing of the kind.
+    login = await api_base.post(
+        "/auth/login",
+        json={"email": "ttft@example.com", "password": "a-very-long-password"},
+    )
+    auth = {"Authorization": f"Bearer {login.json()['access_token']}"}
+    project_id = (await api_base.get("/projects", headers=auth)).json()[0]["id"]
+    await api_base.put(
+        f"/projects/{project_id}/settings", headers=auth, json={"cache_enabled": False}
+    )
+
+    # Warm first. A single cold request pays for the embedding model's first
+    # inference, the classifier's first predict, and connection setup — on this
+    # machine ~250 ms, which swamps a stream whose body is ~20 ms of 2 ms
+    # sleeps. Measured cold, TTFT was 82% of total and this read as buffering;
+    # the tee was fine and the measurement was not.
+    await first_byte_ms(f"{live_proxy.url}/v1/chat/completions", headers)
+
+    proxy_first, proxy_total = await first_byte_ms(f"{live_proxy.url}/v1/chat/completions", headers)
+    direct_first, direct_total = await first_byte_ms(f"{stub_provider.url}/chat/completions", {})
+
+    print(
+        f"\n  provider direct : first {direct_first:6.1f} ms of {direct_total:6.1f} ms"
+        f"\n  through proxy   : first {proxy_first:6.1f} ms of {proxy_total:6.1f} ms"
     )
 
     # The stub sleeps 2 ms between words, so a buffered stream would put the
@@ -138,6 +173,14 @@ async def test_streaming_time_to_first_token_is_not_delayed_by_the_tee(
     assert proxy_first < proxy_total * 0.8, (
         f"first byte at {proxy_first:.1f} ms of a {proxy_total:.1f} ms stream — "
         "the tee appears to be buffering"
+    )
+
+    # And the proxy must not turn a streamed response into a batched one: the
+    # fraction of the stream spent waiting for the first byte should be in the
+    # same league as the provider's own.
+    assert (proxy_first / proxy_total) < (direct_first / direct_total) + 0.25, (
+        f"proxy withholds {proxy_first / proxy_total:.0%} of the stream before "
+        f"the first byte against the provider's {direct_first / direct_total:.0%}"
     )
 
 

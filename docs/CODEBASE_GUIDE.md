@@ -348,6 +348,29 @@ verdict on a robust magnitude test. Both failure modes are pinned by tests; see 
 
 ---
 
+## 11c. Measuring this codebase
+
+**Coverage needs greenlet tracing.** SQLAlchemy's async bridge runs the DBAPI
+portion inside a greenlet, and coverage does not follow greenlet-switched
+frames by default. Without `concurrency = ["thread", "greenlet"]` (now in
+`pyproject.toml`) every database-touching handler reports as uncovered — `auth.py`
+read 61% with thirteen passing tests on it. If a coverage number ever
+contradicts a test you have watched pass, distrust the number.
+
+**Benchmarks need a quiet machine.** `make dev`'s proxy and api containers run
+healthchecks that spawn a `runc` exec every 15 s. Stop them first —
+`docker compose stop proxy api web worker`, leaving postgres and redis — or
+latency measurements triple. Several "failures" during development were
+concurrent pytest runs competing for one database, not defects.
+
+**`make bench` runs the `perf` suite, which the default run excludes.** It is
+the only thing asserting the §5 NFRs, so it rots silently. Last measured:
+proxy overhead 6.8 ms p95 (budget 100), `/usage?range=90d` 82.5 ms p95 over
+505k rows (budget 500), streaming TTFT ~10% of stream duration, matching the
+provider's own.
+
+---
+
 ## 12. Things that look like bugs but aren't
 
 - **Escalation makes some endpoints show negative routing savings.** Correct and intentional. It is
