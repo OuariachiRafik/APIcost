@@ -175,6 +175,37 @@ async def test_authentication_does_not_fail_open(
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.usefixtures("clean_all")
+async def test_a_broken_context_advisory_still_serves_the_request(
+    live_proxy: LiveServer, api_base: AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """§9 asks for one of these per subsystem, and P7 added one without a test.
+
+    The advisory is the least important thing the pipeline does. If it raises,
+    the user should get their completion and lose only the suggestion.
+    """
+    key = await provision_account(api_base, "ctxfailopen@example.com")
+
+    def explode(*args: object, **kwargs: object) -> None:
+        raise RuntimeError("advisory is broken")
+
+    monkeypatch.setattr("apicost.proxy.pipeline.analyse_context", explode)
+
+    async with AsyncClient(timeout=30.0) as raw:
+        response = await raw.post(
+            f"{live_proxy.url}/v1/chat/completions",
+            headers={"Authorization": f"Bearer {key}"},
+            json={
+                "model": "gpt-4o",
+                "messages": [{"role": "user", "content": "still works?"}],
+            },
+        )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["choices"], "the completion did not come back"
+    assert "x-apicost-context-warning" not in response.headers
+
+
 async def test_a_hanging_subsystem_is_cut_off_at_the_budget() -> None:
     """A step that hangs past the deadline must not hang the request."""
     deadline = Deadline(budget_ms=40.0)

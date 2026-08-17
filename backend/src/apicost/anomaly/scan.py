@@ -19,7 +19,7 @@ from redis.asyncio import Redis
 from sqlalchemy import text
 
 from apicost.anomaly.alerts import AlertRequest, raise_alert
-from apicost.anomaly.forest import PatternFeatures, detect, features_from_rows
+from apicost.anomaly.forest import detect, features_from_rows
 from apicost.config import Settings, get_settings
 from apicost.core.logging import get_logger
 from apicost.db.redis import get_redis
@@ -166,7 +166,3 @@ def _bucket(rows: list[dict[str, Any]]) -> list[list[dict[str, Any]]]:
         buckets.setdefault(index, []).append(row)
 
     return [buckets[key] for key in sorted(buckets)]
-
-
-def _empty() -> PatternFeatures:
-    return PatternFeatures(0.0, 0.0, 0.0, 0.0, 0.0)

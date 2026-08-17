@@ -55,7 +55,7 @@ from apicost.budgets.enforcement import (
 )
 from apicost.cache.embeddings import embed
 from apicost.cache.policy import is_cacheable, normalize_prompt
-from apicost.cache.semantic import CacheHit, lookup_exact, lookup_similar, record_hit
+from apicost.cache.semantic import CacheHit, lookup_exact, lookup_similar, prompt_hash, record_hit
 from apicost.cache.semantic import store as semantic_store
 from apicost.config import Settings
 from apicost.core.deadline import Deadline, failopen
@@ -376,7 +376,9 @@ async def run_pipeline(request: ProxyRequest) -> PipelineResult:
 
     if hit is not None:
         # The provider is never called. This is the whole point.
-        return await _serve_from_cache(request, hit, started, timer, context, plan_verdict)
+        return await _serve_from_cache(
+            request, hit, started, timer, context, plan_verdict, normalized
+        )
 
     # -- [4] Routing --------------------------------------------------------
     #
@@ -474,6 +476,7 @@ async def _forward_unary(
     routing_context: _RoutingContext | None = None,
     context: ContextVerdict | None = None,
     plan_verdict: Any = None,
+    normalized_prompt: str = "",
 ) -> PipelineResult:
     """Non-streamed forward."""
     provider = request.provider
@@ -518,6 +521,7 @@ async def _forward_unary(
             # what routing was doing when things went wrong.
             routing_context=routing_context,
             context=context,
+            normalized_prompt=cache_context.normalized_prompt if cache_context else "",
         )
         return PipelineResult(
             status_code=response.status_code,
@@ -570,6 +574,7 @@ async def _forward_unary(
         routing_context=routing_context,
         escalated=escalated,
         context=context,
+        normalized_prompt=cache_context.normalized_prompt if cache_context else "",
     )
 
     if cache_context is not None:
@@ -616,6 +621,7 @@ async def _forward_streaming(
     routing_context: _RoutingContext | None = None,
     context: ContextVerdict | None = None,
     plan_verdict: Any = None,
+    normalized_prompt: str = "",
 ) -> PipelineResult:
     """Streamed forward with a non-buffering tee.
 
@@ -806,6 +812,7 @@ async def _record(
     routing_context: _RoutingContext | None = None,
     escalated: bool = False,
     context: ContextVerdict | None = None,
+    normalized_prompt: str = "",
 ) -> None:
     """Build and enqueue the ledger event. Never raises."""
     now = datetime.now(UTC)
@@ -864,6 +871,7 @@ async def _record(
         ),
         routing_model_version=routing_context.model_version if routing_context else None,
         escalation_triggered=escalated,
+        prompt_hash=prompt_hash(normalized_prompt) if normalized_prompt else None,
         context_warning=context.warn if context else False,
         context_reclaimable_tokens=context.reclaimable_tokens if context else None,
         context_message_count=context.message_count if context else None,
@@ -1031,6 +1039,7 @@ async def _serve_from_cache(
     timer: StageTimer | None = None,
     context: ContextVerdict | None = None,
     plan_verdict: Any = None,
+    normalized_prompt: str = "",
 ) -> PipelineResult:
     """Return a cached response without calling the provider.
 
@@ -1056,6 +1065,7 @@ async def _serve_from_cache(
         cost_override="0",
         timer=timer,
         context=context,
+        normalized_prompt=normalized_prompt,
     )
 
     if timer is not None:

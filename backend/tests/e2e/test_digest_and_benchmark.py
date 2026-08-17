@@ -68,6 +68,12 @@ async def seed_requests(
     prefix: str = "row",
     when: datetime | None = None,
 ) -> None:
+    """`when` must sit inside the window the assertion asks about.
+
+    Defaulting to "yesterday" and then asserting against a hardcoded `now` is a
+    test that passes on the day it is written and fails a week later with no
+    code change — which is exactly what happened here.
+    """
     at = when or datetime.now(UTC) - timedelta(days=1)
     rows = [
         {
@@ -307,10 +313,12 @@ async def test_a_due_user_is_emailed_once_not_twice(api_base: AsyncClient) -> No
     _, project_id = await login(api_base, "weekly@example.com")
     user = await _user_row("weekly@example.com")
     await _set_timezone(str(user.id), "UTC")
-    await seed_requests(str(user.id), project_id, count=50, cost_each=0.01)
+    monday = datetime(2026, 8, 10, 8, 0, tzinfo=UTC)
+    await seed_requests(
+        str(user.id), project_id, count=50, cost_each=0.01, when=monday - timedelta(days=1)
+    )
 
     sender = CapturingSender()
-    monday = datetime(2026, 8, 10, 8, 0, tzinfo=UTC)
 
     assert await send_weekly_digests(sender=sender, now=monday) == 1
     assert await send_weekly_digests(sender=sender, now=monday) == 0, "double-sent"
@@ -329,14 +337,17 @@ async def test_the_digest_is_not_sent_at_the_wrong_local_hour(
     _, project_id = await login(api_base, "tokyo@example.com")
     user = await _user_row("tokyo@example.com")
     await _set_timezone(str(user.id), "Asia/Tokyo")
-    await seed_requests(str(user.id), project_id, count=50, cost_each=0.01)
+    tokyo_due = datetime(2026, 8, 9, 23, tzinfo=UTC)
+    await seed_requests(
+        str(user.id), project_id, count=50, cost_each=0.01, when=tokyo_due - timedelta(days=1)
+    )
 
     sender = CapturingSender()
 
     # 08:00 UTC is 17:00 in Tokyo — not their digest hour.
     assert await send_weekly_digests(sender=sender, now=datetime(2026, 8, 10, 8, tzinfo=UTC)) == 0
     # 23:00 UTC Sunday is 08:00 Monday in Tokyo.
-    assert await send_weekly_digests(sender=sender, now=datetime(2026, 8, 9, 23, tzinfo=UTC)) == 1
+    assert await send_weekly_digests(sender=sender, now=tokyo_due) == 1
 
 
 @pytest.mark.usefixtures("clean_all")
@@ -379,9 +390,10 @@ async def test_a_failed_send_is_retried_next_run(api_base: AsyncClient) -> None:
     _, project_id = await login(api_base, "retry@example.com")
     user = await _user_row("retry@example.com")
     await _set_timezone(str(user.id), "UTC")
-    await seed_requests(str(user.id), project_id, count=50, cost_each=0.01)
-
     monday = datetime(2026, 8, 10, 8, 0, tzinfo=UTC)
+    await seed_requests(
+        str(user.id), project_id, count=50, cost_each=0.01, when=monday - timedelta(days=1)
+    )
 
     failing = CapturingSender(succeed=False)
     assert await send_weekly_digests(sender=failing, now=monday) == 0

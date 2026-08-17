@@ -17,7 +17,6 @@ ADR 0008.
 from __future__ import annotations
 
 import json
-from typing import Any
 
 from redis.asyncio import Redis
 from sqlalchemy import text
@@ -167,11 +166,3 @@ async def checkpoint_to_postgres(states: dict[str, RollingStats]) -> int:
         return written
 
     return written
-
-
-def project_meta_from_row(row: Any) -> dict[str, str]:
-    """Extract the identity fields an alert needs from a ledger event."""
-    return {
-        "user_id": str(row.get("user_id", "")),
-        "project_id": str(row.get("project_id", "")),
-    }

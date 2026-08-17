@@ -72,6 +72,12 @@ class LedgerEvent:
     routing_model_version: str | None = None
     escalation_triggered: bool = False
 
+    prompt_hash: str | None = None
+    """SHA-256 of the normalized prompt — never the prompt (hard rule 9).
+
+    Feeds the unique-prompt-ratio feature in the UC-32 leak detector: scripted
+    abuse enumerates, human traffic repeats."""
+
     context_warning: bool = False
     """UC-26: this request resent history that looked stale. A verdict, never
     the prompt it was computed from (hard rule 9)."""

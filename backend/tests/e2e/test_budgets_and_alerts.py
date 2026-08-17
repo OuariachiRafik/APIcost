@@ -17,6 +17,7 @@ from httpx import AsyncClient
 from sqlalchemy import text
 
 from apicost.anomaly.pipeline import process_ledger_batch
+from apicost.anomaly.scan import WINDOW_MINUTES, scan_usage_patterns
 from apicost.budgets.enforcement import (
     BudgetAction,
     BudgetDecision,
@@ -25,6 +26,7 @@ from apicost.budgets.enforcement import (
     check_budgets,
     record_spend,
 )
+from apicost.core.ids import new_id
 from apicost.db.redis import get_redis
 from apicost.db.session import get_admin_engine
 from tests.e2e.conftest import LiveServer, provision_account
@@ -401,6 +403,107 @@ async def test_a_quiet_project_never_alerts(api_base: AsyncClient) -> None:
     assert await _open_alerts(project_id) == 0
 
 
+# -- UC-32: the slow-path scan ----------------------------------------------
+
+
+@pytest.mark.usefixtures("clean_all")
+async def test_the_pattern_scan_flags_a_leaked_key_shape(api_base: AsyncClient) -> None:
+    """The UC-32 job end to end, not just `forest.detect`.
+
+    This whole path — bucketing, feature extraction, the cohort of history, the
+    alert row — had no test at all: `anomaly/scan.py` sat at 0% coverage while
+    the pure detector it calls was thoroughly covered. A detector that works
+    inside a job nobody runs is not a feature.
+    """
+    await provision_account(api_base, "leak@example.com")
+    _, project_id = await login(api_base, "leak@example.com")
+    user_id = await _user_id(project_id)
+
+    base = _aligned_base(41)
+
+    rows: list[dict[str, Any]] = []
+    # 40 windows of boring, uniform traffic: one model, one endpoint, repeated
+    # prompts. That constancy is what a well-behaved project looks like.
+    for window in range(40):
+        for index in range(8):
+            rows.append(
+                _row(
+                    user_id,
+                    project_id,
+                    base + timedelta(minutes=window * WINDOW_MINUTES, seconds=10 + index * 15),
+                    0.002,
+                    model="gpt-4o",
+                    endpoint="/v1/chat/completions",
+                    prompt_hash="repeated-prompt",
+                )
+            )
+
+    # The most recent window: same volume and spend, different shape.
+    latest = base + timedelta(minutes=40 * WINDOW_MINUTES)
+    for index in range(8):
+        rows.append(
+            _row(
+                user_id,
+                project_id,
+                latest + timedelta(seconds=10 + index * 15),
+                0.002,
+                model=f"model-{index}",
+                endpoint=f"/v1/endpoint-{index}",
+                prompt_hash=f"unique-{index}",
+            )
+        )
+
+    await _insert_ledger(rows)
+
+    alerts_raised = await scan_usage_patterns()
+    assert alerts_raised >= 1, "the scan did not flag an obviously unfamiliar shape"
+
+    alerts = await _alerts(project_id)
+    assert any(a["alert_type"] == "usage_pattern" for a in alerts)
+
+
+@pytest.mark.usefixtures("clean_all")
+async def test_the_pattern_scan_is_quiet_on_uniform_traffic(api_base: AsyncClient) -> None:
+    await provision_account(api_base, "uniform@example.com")
+    _, project_id = await login(api_base, "uniform@example.com")
+    user_id = await _user_id(project_id)
+
+    base = _aligned_base(42)
+    rows = [
+        _row(
+            user_id,
+            project_id,
+            base + timedelta(minutes=window * WINDOW_MINUTES, seconds=10 + index * 15),
+            0.002,
+            model="gpt-4o",
+            endpoint="/v1/chat/completions",
+            prompt_hash="repeated-prompt",
+        )
+        for window in range(41)
+        for index in range(8)
+    ]
+    await _insert_ledger(rows)
+
+    assert await scan_usage_patterns() == 0
+
+
+@pytest.mark.usefixtures("clean_all")
+async def test_the_pattern_scan_ignores_projects_with_no_history(
+    api_base: AsyncClient,
+) -> None:
+    """Below the forest's minimum history it must stay silent, not guess."""
+    await provision_account(api_base, "thinhistory@example.com")
+    _, project_id = await login(api_base, "thinhistory@example.com")
+    user_id = await _user_id(project_id)
+
+    now = datetime.now(UTC)
+    await _insert_ledger(
+        [_row(user_id, project_id, now - timedelta(minutes=index * 6), 0.002) for index in range(6)]
+    )
+
+    assert await scan_usage_patterns() == 0
+
+
 # -- UC-33: the kill switch -------------------------------------------------
 
 
@@ -557,16 +660,61 @@ async def test_budget_reporting_shows_the_number_enforcement_uses(
 # -- helpers ----------------------------------------------------------------
 
 
-def _row(user_id: str, project_id: str, at: datetime, cost: float) -> dict[str, Any]:
+def _row(
+    user_id: str,
+    project_id: str,
+    at: datetime,
+    cost: float,
+    *,
+    model: str = "gpt-4o",
+    endpoint: str = "/v1/chat/completions",
+    prompt_hash: str | None = None,
+) -> dict[str, Any]:
     return {
         "user_id": user_id,
         "project_id": project_id,
         "timestamp": at.isoformat(),
         "cost_usd": cost,
-        "model_used": "gpt-4o",
-        "endpoint": "/v1/chat/completions",
-        "prompt_hash": None,
+        "model_used": model,
+        "endpoint": endpoint,
+        "prompt_hash": prompt_hash,
     }
+
+
+def _aligned_base(windows_back: int) -> datetime:
+    """A start time aligned to a 5-minute boundary, `windows_back` windows ago.
+
+    `_bucket` groups rows by absolute epoch division, not by offset from the
+    first row, so an unaligned fixture straddles boundaries: a window's eight
+    requests land partly in one bucket and partly in the next. That produces
+    history with spread the scenario never intended, and the forest then reads
+    a genuinely unfamiliar window as ordinary. Measured: -0.078 (missed) with
+    an unaligned fixture, -0.448 (flagged) with an aligned one, same data.
+    """
+    now = datetime.now(UTC)
+    span = WINDOW_MINUTES * 60
+    boundary = int(now.timestamp()) // span * span
+    return datetime.fromtimestamp(boundary, UTC) - timedelta(minutes=windows_back * WINDOW_MINUTES)
+
+
+async def _insert_ledger(rows: list[dict[str, Any]]) -> None:
+    """Write rows to `requests_log` directly — the scan reads the table, not
+    the stream, so going through the drain would only add a moving part."""
+    async with get_admin_engine().begin() as conn:
+        await conn.execute(
+            text(
+                "INSERT INTO requests_log (id, timestamp, user_id, project_id, request_id, "
+                "endpoint, provider, model_requested, model_used, tokens_in, tokens_out, "
+                "cost_usd, prompt_hash, cache_hit, routed, escalation_triggered, status) "
+                "VALUES (:id, :timestamp, :user_id, :project_id, :id, :endpoint, 'openai', "
+                ":model_used, :model_used, 100, 50, :cost_usd, :prompt_hash, false, false, "
+                "false, 200)"
+            ),
+            [
+                {**row, "id": new_id(), "timestamp": datetime.fromisoformat(row["timestamp"])}
+                for row in rows
+            ],
+        )
 
 
 async def _counter(project_id: str) -> float:
