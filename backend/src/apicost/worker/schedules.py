@@ -124,6 +124,12 @@ class WorkerSettings:
     max_jobs = 10
     job_timeout = 120
 
-    @staticmethod
-    def redis_settings() -> RedisSettings:  # pragma: no cover - arq reads this
-        return _redis_settings()
+    # An *instance*, not a callable. arq reads this as an attribute
+    # (`settings.redis_settings.host`), so a staticmethod here made the worker
+    # die on boot with "'staticmethod' object has no attribute 'host'" — which
+    # meant the ledger drain and every cron job never ran in a container.
+    #
+    # Evaluated at import, which is fine for a module whose only purpose is to
+    # be the worker entrypoint: the process reads its configuration once and
+    # never outlives it.
+    redis_settings: ClassVar[RedisSettings] = _redis_settings()
