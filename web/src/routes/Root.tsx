@@ -1,40 +1,41 @@
 /**
- * Application shell.
+ * Application root.
  *
- * Signed out: the auth form. Signed in: a nav shell wrapping whichever route
- * is active. Onboarding stays the landing page until there is traffic, since
- * a dashboard with no data teaches a new user nothing.
+ * Signed out: the auth form on a bare page. Signed in: the full shell (§3.1),
+ * unless the account has no project yet — a new user is sent to onboarding,
+ * because a dashboard with nothing in it teaches them nothing about what this
+ * product does.
  */
-import { NavLink, Outlet } from 'react-router-dom';
+import { Navigate, useLocation } from 'react-router-dom';
 
-import { Button } from '../components/ui';
+import { Shell } from '../components/Shell';
+import { Spinner } from '../components/ui';
 import { useAuth } from '../lib/authContext';
+import { useWorkspace } from '../lib/uiContext';
 import { AuthForm } from './AuthForm';
 
-const NAV = [
-  { to: '/', label: 'Overview', end: true },
-  { to: '/requests', label: 'Requests' },
-  { to: '/setup', label: 'Setup' },
-];
-
 export function Root() {
-  const { user, isLoading, logout } = useAuth();
+  const { user, isLoading } = useAuth();
+  const workspace = useWorkspace();
+  const location = useLocation();
 
   if (isLoading) {
     return (
-      <div className="flex min-h-screen items-center justify-center bg-slate-50">
-        <p className="text-sm text-slate-500">Loading…</p>
+      <div className="flex min-h-screen items-center justify-center bg-page">
+        <Spinner />
       </div>
     );
   }
 
   if (!user) {
     return (
-      <div className="min-h-screen bg-slate-50">
-        <main className="mx-auto max-w-lg px-6 py-16">
-          <div className="mb-8 text-center">
-            <h1 className="text-xl font-semibold text-slate-900">APICost</h1>
-            <p className="text-sm text-slate-500">Spend less on the same LLM calls.</p>
+      <div className="min-h-screen bg-page">
+        <main className="mx-auto max-w-md px-6 py-24">
+          <div className="mb-8">
+            <h1 className="text-lg font-semibold tracking-tight text-ink">APICost</h1>
+            <p className="mt-1 text-xs text-muted">
+              See exactly where your API money goes, then spend less of it.
+            </p>
           </div>
           <AuthForm />
         </main>
@@ -42,44 +43,10 @@ export function Root() {
     );
   }
 
-  return (
-    <div className="min-h-screen bg-slate-50">
-      <header className="border-b border-slate-200 bg-white">
-        <div className="mx-auto flex max-w-6xl items-center justify-between px-6 py-3">
-          <div className="flex items-center gap-8">
-            <h1 className="text-base font-semibold text-slate-900">APICost</h1>
-            <nav className="flex gap-1">
-              {NAV.map((item) => (
-                <NavLink
-                  key={item.to}
-                  to={item.to}
-                  end={item.end}
-                  className={({ isActive }) =>
-                    `rounded px-3 py-1.5 text-sm ${
-                      isActive
-                        ? 'bg-slate-100 font-medium text-slate-900'
-                        : 'text-slate-600 hover:bg-slate-50'
-                    }`
-                  }
-                >
-                  {item.label}
-                </NavLink>
-              ))}
-            </nav>
-          </div>
+  const needsSetup =
+    !workspace.isLoading && workspace.projects.length === 0 && location.pathname !== '/setup';
 
-          <div className="flex items-center gap-3">
-            <span className="hidden text-sm text-slate-600 sm:inline">{user.email}</span>
-            <Button variant="secondary" onClick={() => void logout()}>
-              Sign out
-            </Button>
-          </div>
-        </div>
-      </header>
+  if (needsSetup) return <Navigate to="/setup" replace />;
 
-      <main className="mx-auto max-w-6xl px-6 py-8">
-        <Outlet />
-      </main>
-    </div>
-  );
+  return <Shell />;
 }

@@ -52,7 +52,15 @@ class Settings(BaseSettings):
     """
 
     database_admin_url: str = "postgresql+asyncpg://apicost:apicost@localhost:5433/apicost"
-    """Connection used by Alembic only. Owns the schema and may run DDL."""
+    """The schema owner. Alembic uses it for DDL, and so do the few runtime
+    paths that must legitimately read across users — the ledger drain, anomaly
+    scoring, the weekly digest, and the peer benchmark (see
+    ``db/session.get_admin_engine``).
+
+    The default is the *host* port mapping, which is right for `make migrate`
+    and wrong inside a container. Any deployment running the API or worker in a
+    container must set ``APICOST_DATABASE_ADMIN_URL`` explicitly; docker-compose
+    does."""
 
     redis_url: str = "redis://localhost:6379/0"
 
@@ -108,6 +116,12 @@ class Settings(BaseSettings):
     smtp_port: int = 1025
     email_from: str = "apicost@localhost"
     public_base_url: str = "http://localhost:8001"
+    """Origin used to build links in outbound email — unsubscribe, mainly.
+
+    Must be the API's public origin, not the SPA's: the unsubscribe link has to
+    work with one click from a mail client, without a logged-in session and
+    without JavaScript."""
+
     web_base_url: str = "http://localhost:5173"
     """Where Stripe Checkout returns the user. The SPA, not the API."""
 
@@ -116,11 +130,6 @@ class Settings(BaseSettings):
     """Empty means billing is not configured. The webhook then fails closed
     rather than trusting unverified input."""
 
-    """Origin used to build links in outbound email — unsubscribe, mainly.
-
-    Must be the API's public origin, not the SPA's: the unsubscribe link has to
-    work with one click from a mail client, without a logged-in session and
-    without JavaScript."""
     resend_api_key: SecretStr = SecretStr("")
     """Empty in development, where alerts go to mailpit over SMTP instead."""
 

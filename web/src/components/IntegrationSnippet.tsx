@@ -52,7 +52,7 @@ await client.chat.completions.create({
       <CodeBlock label="Node (openai SDK)" code={node} />
       <CodeBlock label="cURL" code={curl} />
 
-      <p className="text-sm text-slate-600">
+      <p className="text-sm text-muted">
         Your existing code keeps working unchanged — same request shape, same response shape.
         APICost adds its own metadata in response headers, never in the body.
       </p>

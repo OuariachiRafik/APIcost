@@ -9,6 +9,7 @@ import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { AuthProvider } from '../lib/auth';
+import { ToastProvider, WorkspaceProvider } from '../lib/UiProviders';
 import { Onboarding } from './Onboarding';
 import { Root } from './Root';
 
@@ -57,6 +58,8 @@ function stubApi(overrides: Record<string, () => Response> = {}) {
         },
         201,
       ),
+    // A new account has none — which is exactly what sends Root to /setup.
+    'GET /projects': () => json([]),
     'POST /projects': () =>
       json({ id: '01JPROJ', name: 'production', created_at: '2026-08-05T00:00:00Z' }, 201),
     'POST /projects/01JPROJ/proxy-keys': () =>
@@ -83,13 +86,28 @@ function renderApp() {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   // A memory router so the shell renders its Outlet without touching history.
   const router = createMemoryRouter(
-    [{ path: '/', element: <Root />, children: [{ index: true, element: <Onboarding /> }] }],
+    [
+      {
+        path: '/',
+        element: <Root />,
+        children: [
+          { index: true, element: <Onboarding /> },
+          // Root redirects here when the account has no project yet, so the
+          // route has to exist for the redirect to land on anything.
+          { path: 'setup', element: <Onboarding /> },
+        ],
+      },
+    ],
     { initialEntries: ['/'] },
   );
   return render(
     <QueryClientProvider client={client}>
       <AuthProvider>
-        <RouterProvider router={router} />
+        <WorkspaceProvider>
+          <ToastProvider>
+            <RouterProvider router={router} />
+          </ToastProvider>
+        </WorkspaceProvider>
       </AuthProvider>
     </QueryClientProvider>,
   );

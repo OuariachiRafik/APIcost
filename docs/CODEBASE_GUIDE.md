@@ -122,6 +122,10 @@ the request still succeeds.
 | Touch the Stripe webhook | `billing/stripe_gateway.py` — read the module docstring first; it is a public unauthenticated endpoint that changes entitlements |
 | Change the peer-benchmark disclosure rules | `advisor/benchmark.py` — the ≥50 floor is a k-anonymity guarantee, not a tuning knob |
 | Regenerate the TypeScript client | `make api-types`; `make check` fails if it has drifted |
+| Add a dashboard screen | `web/src/routes/`, wired in `main.tsx`, nav in `components/Shell.tsx` |
+| Change a colour or spacing token | `web/src/index.css` — dark-only in v1, see APICOST_FRONTEND_SPEC §2.2 |
+| Add a shared UI primitive | `web/src/components/ui.tsx` |
+| Call a new endpoint from the UI | `web/src/lib/queries.ts` — keys and fetchers live together on purpose |
 | Change long-context detection | `advisor/prompts.py` (pure); it runs on the proxy inside a 5 ms budget |
 | Change GPU prices or throughput | `advisor/nightly.py:GPU_OPTIONS` — hardcoded and will go stale, see P8's report |
 | Change what earns a recommendation | `advisor/downgrade.py`, `advisor/breakeven.py` (both pure) |
@@ -345,6 +349,27 @@ split features that are constant in that history — which is exactly the set a 
 the detector scores the leak as normal. Fit it on history plus the scored point and it flags *any*
 deviation from a constant feature, however small. `anomaly/forest.py` does the second and gates the
 verdict on a robust magnitude test. Both failure modes are pinned by tests; see P6's report.
+
+---
+
+## 11b2. The dashboard
+
+Built to `APICOST_FRONTEND_SPEC.md`, which resolves its own open questions and
+logs 27 explicit decisions. Three things there are worth knowing before editing:
+
+**Every money field arrives as a JSON string.** `cost_usd`, `savings_usd` and
+friends are Pydantic `Decimal`s, which serialise as strings so no precision is
+lost in transit. `lib/format.ts:num()` coerces them; adding two of them without
+it produces `"12.406.10"` and renders without complaint. `Overview.test.tsx`
+pins this.
+
+**Screens are project-scoped through one global switcher.** `useWorkspace()`
+owns the selected project and time range, both persisted to localStorage. A
+stored project id that no longer exists falls back to the first available one
+rather than 404ing every screen.
+
+**Dark-only, desktop-only, data-dense** — all three are deliberate v1 choices
+(spec §4.4, §4.5, §2.5), not unfinished work.
 
 ---
 

@@ -4,10 +4,17 @@ import { createRoot } from 'react-dom/client';
 import { createBrowserRouter, RouterProvider } from 'react-router-dom';
 
 import { AuthProvider } from './lib/auth';
-import { Dashboard } from './routes/Dashboard';
+import { ToastProvider, WorkspaceProvider } from './lib/UiProviders';
+import { Advisor } from './routes/Advisor';
+import { Alerts } from './routes/Alerts';
+import { Billing } from './routes/Billing';
+import { Budgets } from './routes/Budgets';
+import { Cache } from './routes/Cache';
 import { Onboarding } from './routes/Onboarding';
-import { Requests } from './routes/Requests';
+import { Overview } from './routes/Overview';
 import { Root } from './routes/Root';
+import { Routing } from './routes/Routing';
+import { Settings } from './routes/Settings';
 import './index.css';
 
 const queryClient = new QueryClient({
@@ -22,8 +29,14 @@ const router = createBrowserRouter([
     path: '/',
     element: <Root />,
     children: [
-      { index: true, element: <Dashboard /> },
-      { path: 'requests', element: <Requests /> },
+      { index: true, element: <Overview /> },
+      { path: 'cache', element: <Cache /> },
+      { path: 'routing', element: <Routing /> },
+      { path: 'budgets', element: <Budgets /> },
+      { path: 'alerts', element: <Alerts /> },
+      { path: 'advisor', element: <Advisor /> },
+      { path: 'settings', element: <Settings /> },
+      { path: 'billing', element: <Billing /> },
       { path: 'setup', element: <Onboarding /> },
     ],
   },
@@ -38,7 +51,11 @@ createRoot(container).render(
   <StrictMode>
     <QueryClientProvider client={queryClient}>
       <AuthProvider>
-        <RouterProvider router={router} />
+        <WorkspaceProvider>
+          <ToastProvider>
+            <RouterProvider router={router} />
+          </ToastProvider>
+        </WorkspaceProvider>
       </AuthProvider>
     </QueryClientProvider>
   </StrictMode>,

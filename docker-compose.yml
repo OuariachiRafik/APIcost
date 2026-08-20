@@ -13,6 +13,12 @@ x-backend-env: &backend-env
   # that owns the schema — a superuser bypasses row-level security.
   # See docker/postgres/init/01-app-role.sql.
   APICOST_DATABASE_URL: postgresql+asyncpg://apicost_app:apicost_app@postgres:5432/apicost
+  # The owner role, for the paths that legitimately read across users: the
+  # ledger drain, anomaly scoring, the digest, and the peer benchmark. Its
+  # default points at localhost:5433 — the *host* port mapping — because it was
+  # originally Alembic-only. Inside a container nothing listens there, so every
+  # one of those paths failed with a connection refused until this was set.
+  APICOST_DATABASE_ADMIN_URL: postgresql+asyncpg://apicost:apicost@postgres:5432/apicost
   APICOST_REDIS_URL: redis://redis:6379/0
   APICOST_SMTP_HOST: mailpit
   APICOST_SMTP_PORT: "1025"

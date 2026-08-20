@@ -36,7 +36,7 @@ export function AuthForm() {
       <h2 className="mb-1 text-lg font-semibold">
         {isSignup ? 'Create your account' : 'Welcome back'}
       </h2>
-      <p className="mb-6 text-sm text-slate-600">
+      <p className="mb-6 text-sm text-muted">
         {isSignup
           ? 'You will connect a provider key next. It is encrypted before it touches disk.'
           : 'Sign in to your dashboard.'}
@@ -75,11 +75,11 @@ export function AuthForm() {
         </Button>
       </form>
 
-      <p className="mt-6 text-sm text-slate-600">
+      <p className="mt-6 text-sm text-muted">
         {isSignup ? 'Already have an account?' : 'Need an account?'}{' '}
         <button
           type="button"
-          className="font-medium text-slate-900 underline"
+          className="font-medium text-ink underline"
           onClick={() => {
             setMode(isSignup ? 'login' : 'signup');
             setError(null);
